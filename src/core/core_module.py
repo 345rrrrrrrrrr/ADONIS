@@ -154,8 +154,9 @@ class CoreModule(Module):
             }
             
             # Update the resource usage dictionary
+            import time
             self.resource_usage = {
-                "timestamp": import time; time.time(),
+                "timestamp": time.time(),
                 "cpu": {
                     "percent": cpu_percent,
                     "freq_mhz": cpu_freq_current

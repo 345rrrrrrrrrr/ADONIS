@@ -1,0 +1,29 @@
+# ADONIS Development Dependencies
+# Dependencies required for development and testing
+
+# Testing tools
+pytest>=7.3.1        # Testing framework
+pytest-cov>=4.1.0    # Coverage reporting
+pytest-mock>=3.10.0  # Mocking support
+
+# Code quality tools
+black>=23.3.0        # Code formatting
+isort>=5.12.0        # Import sorting
+pylint>=2.17.0       # Linting
+mypy>=1.2.0          # Static type checking
+flake8>=6.0.0        # Style guide enforcement
+
+# Documentation tools
+sphinx>=6.1.3        # Documentation generator
+sphinx-rtd-theme>=1.2.0  # Read the Docs theme
+sphinx-autodoc-typehints>=1.22.0  # Type hints in documentation
+
+# Development utilities
+ipython>=8.12.0      # Enhanced interactive Python shell
+jupyter>=1.0.0       # Notebooks for documentation and exploration
+tox>=4.5.1          # Standardized testing across environments
+
+# Packaging
+build>=0.10.0        # PEP 517 package builder
+twine>=4.0.2         # Package upload utility
+setuptools>=67.7.2   # Setup script

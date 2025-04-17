@@ -1,0 +1,5 @@
+Collecting distro
+  Downloading distro-1.9.0-py3-none-any.whl.metadata (6.8 kB)
+Downloading distro-1.9.0-py3-none-any.whl (20 kB)
+Installing collected packages: distro
+Successfully installed distro-1.9.0

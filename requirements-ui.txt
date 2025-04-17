@@ -1,0 +1,7 @@
+# ADONIS UI Dependencies
+# Dependencies required for the graphical user interface
+
+# PyQt5-based UI
+PyQt5>=5.15.6        # Main UI framework
+PyQtWebEngine>=5.15.5  # For embedded web content
+QtAwesome>=1.2.0     # Icon support for Qt applications

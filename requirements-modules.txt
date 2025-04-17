@@ -1,0 +1,19 @@
+# ADONIS Module Dependencies
+# Dependencies required for the functional modules
+
+# Network scanning module dependencies
+python-nmap>=0.7.1   # For nmap integration
+ipaddress>=1.0.23    # For IP validation
+
+# Packet analyzer module dependencies
+scapy>=2.4.5         # For packet capture and analysis
+pyshark>=0.5.3       # For Wireshark integration
+
+# Debugger module dependencies
+pygdbmi>=0.10.0      # For GDB integration
+capstone>=4.0.2      # For disassembly
+pyelftools>=0.29     # For ELF parsing
+
+# Terminal module dependencies
+paramiko>=2.11.0     # SSH client
+ptyprocess>=0.7.0    # For terminal emulation
