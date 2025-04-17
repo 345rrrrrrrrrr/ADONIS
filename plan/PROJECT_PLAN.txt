@@ -126,6 +126,67 @@ This project aims to create a unified, AI-powered application that combines the 
 
 ---
 
+BUILDING ADONIS: LANGUAGES, LIBRARIES, REQUIREMENTS, AND TUTORIAL
+
+A. Recommended Programming Languages
+1. Frontend/UI: JavaScript/TypeScript with Electron (for cross-platform desktop app) or Qt (C++/Python) for native UI.
+2. Backend/Core Modules: Rust (for performance and safety), Go (for concurrency and networking), or Python (for rapid development and AI integration).
+3. AI Assistant: Python (for integration with AI/ML libraries such as PyTorch, TensorFlow, or transformers).
+4. Scripting Engine: Python and JavaScript (Node.js) for user automation and plugin support.
+
+B. Key Libraries and Packages
+- Electron (JS/TS) or PyQt5/PySide2 (Python) or Qt (C++) for UI.
+- Flask/FastAPI (Python), Actix (Rust), or Gin (Go) for RESTful API.
+- Scapy (Python) for packet analysis.
+- Ptrace (Python), gdb (via pygdbmi), or custom Rust/Go bindings for debugging/memory editing.
+- Paramiko (Python) or node-pty (JS) for terminal/shell access.
+- SQLAlchemy (Python) or Diesel (Rust) for database/storage.
+- cryptography (Python), ring (Rust), or crypto (Go) for encryption.
+- PyTorch, TensorFlow, or HuggingFace transformers (Python) for AI assistant.
+- Docker for containerization.
+- pytest/unittest (Python), cargo test (Rust), or go test (Go) for testing.
+
+C. Hardware Requirements
+- Minimum: 8GB RAM, 2 CPU cores, 10GB free disk space (for basic use)
+- Recommended: 16GB+ RAM, 4+ CPU cores, SSD storage, optional GPU (NVIDIA, 6GB+) for AI features
+- For large-scale or multi-user: Server-class CPU, 32GB+ RAM, dedicated GPU, 100GB+ storage
+
+D. Step-by-Step Tutorial: How to Build ADONIS
+1. Set up your development environment:
+   - Install Linux, Python 3.10+, Node.js 18+, Rust, Go, Docker, and Git.
+   - Install build tools: gcc/clang, make, CMake (for native modules).
+2. Clone the ADONIS repository:
+   git clone <repo-url>
+3. Install dependencies:
+   - For Python: pip install -r requirements.txt
+   - For Node.js: npm install (in UI directory)
+   - For Rust: cargo build (in core modules)
+   - For Go: go mod tidy && go build (in relevant modules)
+4. Build the frontend:
+   - If using Electron: npm run build
+   - If using Qt: qmake && make or python -m PyQt5
+5. Build the backend modules:
+   - Python: python setup.py build
+   - Rust: cargo build --release
+   - Go: go build ./...
+6. Configure environment variables and settings (see config examples in docs).
+7. Run the application in development mode:
+   - Backend: ./adonis-backend or python main.py or cargo run
+   - Frontend: npm start (Electron) or ./adonis-ui (Qt)
+8. Test modules individually using provided test scripts or test suites.
+9. Package the application:
+   - Electron: npm run package
+   - Docker: docker build -t adonis .
+10. Deploy to your target environment (local, VM, or server).
+
+E. Notes
+- Use virtual environments (venv, conda) for Python dependencies.
+- For AI features, ensure CUDA drivers are installed if using GPU.
+- Refer to the documentation for module-specific build and run instructions.
+- Community plugins and scripts can be added via the Marketplace or plugin directory.
+
+---
+
 121. SETUP INSTRUCTIONS
 122. Ensure your system meets the minimum requirements: Linux OS, 8GB RAM, 2 CPU cores, 10GB free disk space.
 123. Download the latest release from the official repository or website.
