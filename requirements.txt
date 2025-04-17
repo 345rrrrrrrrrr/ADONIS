@@ -1,0 +1,55 @@
+# ADONIS - AI-powered Debugging and Offensive Network Integrated Suite
+# Dependencies
+
+# Core dependencies
+pyyaml>=6.0.0        # For configuration handling
+psutil>=5.9.0        # For system monitoring
+cryptography>=38.0.0  # For secure storage and encryption
+requests>=2.28.0     # For HTTP requests
+click>=8.1.0         # For CLI interface
+
+# UI dependencies (based on implementation choice)
+# For PyQt5-based UI:
+PyQt5>=5.15.6        # Main UI framework
+PyQtWebEngine>=5.15.5  # For embedded web content
+
+# Network scanning module dependencies
+python-nmap>=0.7.1   # For nmap integration
+ipaddress>=1.0.23    # For IP validation
+
+# Packet analyzer module dependencies
+scapy>=2.4.5         # For packet capture and analysis
+pyshark>=0.5.3       # For Wireshark integration
+
+# Debugger module dependencies
+pygdbmi>=0.10.0      # For GDB integration
+capstone>=4.0.2      # For disassembly
+pyelftools>=0.29     # For ELF parsing
+
+# Terminal module dependencies
+paramiko>=2.11.0     # SSH client
+ptyprocess>=0.7.0    # For terminal emulation
+
+# Memory editor module dependencies
+# Most functionality is custom-built with ctypes
+
+# API server dependencies
+fastapi>=0.95.0      # For REST API
+uvicorn>=0.21.1      # ASGI server
+
+# AI assistant dependencies
+numpy>=1.23.0        # Numerical operations
+transformers>=4.27.0 # For AI models
+sentence-transformers>=2.2.2  # For embeddings
+torch>=2.0.0         # PyTorch for AI functionality
+nltk>=3.8.1          # Natural language processing
+
+# Testing and development
+pytest>=7.3.1        # Testing framework
+black>=23.3.0        # Code formatting
+isort>=5.12.0        # Import sorting
+pylint>=2.17.0       # Linting
+
+# Optional dependencies
+# distro>=1.8.0      # For better OS detection
+# pyinstaller>=5.9.0  # For binary packaging
