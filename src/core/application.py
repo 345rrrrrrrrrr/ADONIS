@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional
 from core.module_manager import ModuleManager
 from core.user_manager import UserManager
 from core.api_server import APIServer
+from core.workflow import WorkflowManager, network_scan_to_packet_capture, terminal_command_to_packet_capture
 
 class AdonisApp:
     """
@@ -35,6 +36,7 @@ class AdonisApp:
         self.module_manager = ModuleManager(self)
         self.user_manager = UserManager(self)
         self.api_server = APIServer(self)
+        self.workflow_manager = WorkflowManager(self)
         
         # Initialize AI Assistant if enabled
         self.ai_assistant = None
@@ -85,6 +87,9 @@ class AdonisApp:
             self.logger.error("Failed to load all required modules. Exiting.")
             return 1
         
+        # Register cross-module workflows
+        self._register_workflows()
+        
         # Start the API server
         if not self.api_server.start():
             self.logger.error("Failed to start API server. Exiting.")
@@ -111,6 +116,30 @@ class AdonisApp:
             self._shutdown()
         
         return 0
+    
+    def _register_workflows(self):
+        """Register cross-module workflows."""
+        self.logger.info("Registering cross-module workflows...")
+        
+        # Network scan to packet capture workflow
+        self.workflow_manager.register_workflow(
+            "network_scan_to_packet_capture",
+            "Start a packet capture based on network scan results",
+            ["network_scanner", "packet_analyzer"],
+            network_scan_to_packet_capture
+        )
+        
+        # Terminal command with packet capture workflow
+        self.workflow_manager.register_workflow(
+            "terminal_command_to_packet_capture",
+            "Run a terminal command while capturing related network traffic",
+            ["terminal", "packet_analyzer"],
+            terminal_command_to_packet_capture
+        )
+        
+        # Log registered workflows
+        available_workflows = self.workflow_manager.get_available_workflows()
+        self.logger.info(f"Registered {len(available_workflows)} workflows")
     
     def _run_system_checks(self) -> bool:
         """
