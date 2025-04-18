@@ -1,345 +1,567 @@
 #!/usr/bin/env python3
 # ADONIS Packet Analyzer Widget
 
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-                           QPushButton, QTextEdit, QTableWidget, QTableWidgetItem, 
-                           QComboBox, QSplitter, QToolBar, QAction, QHeaderView)
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QSize
-from PyQt5.QtGui import QIcon, QFont
+import os
+import time
+from typing import Dict, List, Any, Optional, Callable
+
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
+    QTextEdit, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QSplitter, QLineEdit, QCheckBox, QSpinBox, QGroupBox, QFileDialog,
+    QMessageBox
+)
 
 class PacketAnalyzerWidget(QWidget):
     """
-    Widget for the packet analyzer module of ADONIS.
-    Provides an interface for analyzing network traffic.
+    Widget for the Packet Analyzer module.
+    Provides UI elements for capturing and analyzing network packets.
     """
+    
+    # Signals
+    captureStarted = pyqtSignal(str)  # Emits capture ID when started
+    captureStopped = pyqtSignal(str)  # Emits capture ID when stopped
+    captureCompleted = pyqtSignal(str, dict)  # Emits capture ID and stats
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.app = None
         self.module = None
+        self.active_capture_id = None
+        self.current_view_capture = None
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_status)
+        self.status_timer.setInterval(1000)  # Update every second
+        
         self.init_ui()
+    
+    def set_app(self, app):
+        """Set the application instance."""
+        self.app = app
+        
+        # Get module reference
+        if self.app:
+            self.module = self.app.module_manager.get_module("packet_analyzer")
+            if self.module:
+                self.refresh_interfaces()
+                self.status_timer.start()
     
     def init_ui(self):
         """Initialize the user interface."""
-        self.main_layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout()
         
-        # Create toolbar
-        self.toolbar = QToolBar()
-        self.toolbar.setIconSize(QSize(24, 24))
+        # Split the widget into control area and display area
+        splitter = QSplitter(Qt.Vertical)
         
-        self.action_start = QAction(QIcon.fromTheme("media-record"), "Start Capture", self)
-        self.action_stop = QAction(QIcon.fromTheme("media-playback-stop"), "Stop Capture", self)
-        self.action_clear = QAction(QIcon.fromTheme("edit-clear"), "Clear", self)
-        self.action_save = QAction(QIcon.fromTheme("document-save"), "Save Capture", self)
-        self.action_load = QAction(QIcon.fromTheme("document-open"), "Load Capture", self)
-        self.action_analyze = QAction(QIcon.fromTheme("document-properties"), "Analyze", self)
+        # Control area
+        control_widget = QWidget()
+        control_layout = QVBoxLayout(control_widget)
         
-        self.toolbar.addAction(self.action_start)
-        self.toolbar.addAction(self.action_stop)
-        self.toolbar.addAction(self.action_clear)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_save)
-        self.toolbar.addAction(self.action_load)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_analyze)
-        
-        self.main_layout.addWidget(self.toolbar)
-        
-        # Filter controls
-        self.filter_layout = QHBoxLayout()
-        
-        self.interface_label = QLabel("Interface:")
+        # Interface selection
+        interface_layout = QHBoxLayout()
+        interface_layout.addWidget(QLabel("Interface:"))
         self.interface_combo = QComboBox()
+        self.interface_combo.setMinimumWidth(200)
+        interface_layout.addWidget(self.interface_combo)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh_interfaces)
+        interface_layout.addWidget(self.refresh_btn)
+        control_layout.addLayout(interface_layout)
         
-        self.filter_label = QLabel("Filter:")
-        self.filter_input = QLineEdit()
-        self.filter_input.setPlaceholderText("Enter capture filter (e.g., tcp port 80)")
-        self.apply_button = QPushButton("Apply")
+        # Capture options
+        options_group = QGroupBox("Capture Options")
+        options_layout = QVBoxLayout(options_group)
         
-        self.filter_layout.addWidget(self.interface_label)
-        self.filter_layout.addWidget(self.interface_combo, 1)
-        self.filter_layout.addWidget(self.filter_label)
-        self.filter_layout.addWidget(self.filter_input, 3)
-        self.filter_layout.addWidget(self.apply_button)
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filter:"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.setEditable(True)
+        filter_layout.addWidget(self.filter_combo)
+        options_layout.addLayout(filter_layout)
         
-        self.main_layout.addLayout(self.filter_layout)
+        options_row = QHBoxLayout()
         
-        # Splitter for packet list and details
-        self.main_splitter = QSplitter(Qt.Vertical)
+        options_row.addWidget(QLabel("Duration (s):"))
+        self.duration_spin = QSpinBox()
+        self.duration_spin.setRange(1, 3600)
+        self.duration_spin.setValue(60)
+        options_row.addWidget(self.duration_spin)
         
-        # Packet list table
+        options_row.addWidget(QLabel("Packet limit:"))
+        self.packet_limit_spin = QSpinBox()
+        self.packet_limit_spin.setRange(0, 1000000)
+        self.packet_limit_spin.setValue(0)
+        self.packet_limit_spin.setSpecialValueText("No limit")
+        options_row.addWidget(self.packet_limit_spin)
+        
+        options_row.addWidget(QLabel("Ring buffer:"))
+        self.ring_buffer_check = QCheckBox()
+        options_row.addWidget(self.ring_buffer_check)
+        
+        options_row.addWidget(QLabel("File size (MB):"))
+        self.filesize_spin = QSpinBox()
+        self.filesize_spin.setRange(1, 1000)
+        self.filesize_spin.setValue(10)
+        options_row.addWidget(self.filesize_spin)
+        
+        options_row.addStretch()
+        options_layout.addLayout(options_row)
+        
+        control_layout.addWidget(options_group)
+        
+        # Capture control buttons
+        buttons_layout = QHBoxLayout()
+        self.start_btn = QPushButton("Start Capture")
+        self.start_btn.clicked.connect(self.start_capture)
+        buttons_layout.addWidget(self.start_btn)
+        
+        self.stop_btn = QPushButton("Stop Capture")
+        self.stop_btn.clicked.connect(self.stop_capture)
+        self.stop_btn.setEnabled(False)
+        buttons_layout.addWidget(self.stop_btn)
+        
+        self.analyze_btn = QPushButton("Analyze Selected")
+        self.analyze_btn.clicked.connect(self.analyze_selected)
+        self.analyze_btn.setEnabled(False)
+        buttons_layout.addWidget(self.analyze_btn)
+        
+        self.export_btn = QPushButton("Export Selected")
+        self.export_btn.clicked.connect(self.export_selected)
+        self.export_btn.setEnabled(False)
+        buttons_layout.addWidget(self.export_btn)
+        
+        control_layout.addLayout(buttons_layout)
+        
+        # Status area
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(QLabel("Status:"))
+        self.status_label = QLabel("Ready")
+        status_layout.addWidget(self.status_label)
+        
+        status_layout.addWidget(QLabel("Packets:"))
+        self.packet_count_label = QLabel("0")
+        status_layout.addWidget(self.packet_count_label)
+        
+        status_layout.addWidget(QLabel("Duration:"))
+        self.duration_label = QLabel("00:00:00")
+        status_layout.addWidget(self.duration_label)
+        
+        status_layout.addStretch()
+        control_layout.addLayout(status_layout)
+        
+        # Add control widget to splitter
+        splitter.addWidget(control_widget)
+        
+        # Display area with tabs
+        self.tab_widget = QTabWidget()
+        
+        # History tab
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(7)
+        self.history_table.setHorizontalHeaderLabels([
+            "ID", "Start Time", "Interface", "Filter", "Status", 
+            "Packets", "Duration"
+        ])
+        self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.history_table.itemSelectionChanged.connect(self.selection_changed)
+        self.tab_widget.addTab(self.history_table, "Capture History")
+        
+        # Packet view tab
+        self.packet_view = QWidget()
+        packet_layout = QVBoxLayout(self.packet_view)
+        
+        # Filter for packet view
+        filter_packet_layout = QHBoxLayout()
+        filter_packet_layout.addWidget(QLabel("Display Filter:"))
+        self.display_filter_edit = QLineEdit()
+        filter_packet_layout.addWidget(self.display_filter_edit)
+        self.apply_filter_btn = QPushButton("Apply")
+        self.apply_filter_btn.clicked.connect(self.apply_display_filter)
+        filter_packet_layout.addWidget(self.apply_filter_btn)
+        packet_layout.addLayout(filter_packet_layout)
+        
+        # Packet list
         self.packet_table = QTableWidget()
         self.packet_table.setColumnCount(7)
         self.packet_table.setHorizontalHeaderLabels([
             "No.", "Time", "Source", "Destination", "Protocol", "Length", "Info"
         ])
-        self.packet_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.packet_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.packet_table.horizontalHeader().setStretchLastSection(True)
+        self.packet_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.packet_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        packet_layout.addWidget(self.packet_table)
         
-        # Packet details pane
+        # Packet details
+        packet_details_layout = QVBoxLayout()
+        packet_details_layout.addWidget(QLabel("Packet Details:"))
         self.packet_details = QTextEdit()
-        self.packet_details.setFont(QFont("Monospace", 10))
         self.packet_details.setReadOnly(True)
+        packet_details_layout.addWidget(self.packet_details)
+        packet_layout.addLayout(packet_details_layout)
         
-        # Add widgets to splitter
-        self.main_splitter.addWidget(self.packet_table)
-        self.main_splitter.addWidget(self.packet_details)
+        self.tab_widget.addTab(self.packet_view, "Packet View")
         
-        # Set splitter sizes
-        self.main_splitter.setStretchFactor(0, 2)
-        self.main_splitter.setStretchFactor(1, 1)
+        # Add tab widget to splitter
+        splitter.addWidget(self.tab_widget)
         
-        # Status bar
-        self.status_layout = QHBoxLayout()
-        self.status_label = QLabel("Ready")
-        self.packet_count_label = QLabel("Packets: 0")
-        self.status_layout.addWidget(self.status_label, 1)  # Stretch factor
-        self.status_layout.addWidget(self.packet_count_label)
+        # Set initial splitter sizes (1:3 ratio)
+        splitter.setSizes([100, 300])
         
-        # Add widgets to the main layout
-        self.main_layout.addWidget(self.main_splitter, 1)  # Stretch factor
-        self.main_layout.addLayout(self.status_layout)
+        # Add splitter to main layout
+        main_layout.addWidget(splitter)
+        self.setLayout(main_layout)
         
-        # Connect signals
-        self.action_start.triggered.connect(self.on_start_capture)
-        self.action_stop.triggered.connect(self.on_stop_capture)
-        self.action_clear.triggered.connect(self.on_clear_capture)
-        self.action_save.triggered.connect(self.on_save_capture)
-        self.action_load.triggered.connect(self.on_load_capture)
-        self.action_analyze.triggered.connect(self.on_analyze)
-        self.apply_button.clicked.connect(self.on_apply_filter)
-        self.packet_table.itemSelectionChanged.connect(self.on_packet_selected)
-        
-        # Disable buttons initially
-        self.action_stop.setEnabled(False)
-        self.action_save.setEnabled(False)
-        self.action_analyze.setEnabled(False)
+        # Initialize filter presets
+        self._init_filter_presets()
     
-    def set_module(self, module):
-        """
-        Set the module instance associated with this widget.
-        
-        Args:
-            module: Packet analyzer module instance
-        """
-        self.module = module
-        
-        # Connect signals from the module
-        if hasattr(module, "packet_received_signal"):
-            module.packet_received_signal.connect(self.on_packet_received)
-            
-        if hasattr(module, "capture_status_changed_signal"):
-            module.capture_status_changed_signal.connect(self.on_capture_status_changed)
-            
-        if hasattr(module, "interfaces_updated_signal"):
-            module.interfaces_updated_signal.connect(self.on_interfaces_updated)
-            
-        # Request available interfaces
-        if hasattr(module, "get_interfaces"):
-            interfaces = module.get_interfaces()
-            self.update_interfaces(interfaces)
+    def _init_filter_presets(self):
+        """Initialize filter presets."""
+        # Will be populated when module is set
+        self.filter_combo.clear()
+        self.filter_combo.addItem("", "")  # Empty default
+        # Other filters will be added when module is set
     
-    def update_interfaces(self, interfaces):
-        """
-        Update the interface dropdown with available network interfaces.
-        
-        Args:
-            interfaces: List of network interfaces
-        """
+    def refresh_interfaces(self):
+        """Refresh the list of network interfaces."""
+        if not self.module:
+            return
+            
+        current_text = self.interface_combo.currentText()
         self.interface_combo.clear()
         
-        for interface in interfaces:
-            name = interface.get("name", "")
-            description = interface.get("description", "")
-            display_name = f"{name} - {description}" if description else name
-            self.interface_combo.addItem(display_name, userData=name)
-    
-    def on_interfaces_updated(self, interfaces):
-        """
-        Handle updated interface list.
+        # Get interfaces from module
+        interfaces = self.module.get_interfaces()
+        for iface in interfaces:
+            self.interface_combo.addItem(f"{iface['name']} - {iface['description']}", iface['name'])
         
-        Args:
-            interfaces: List of network interfaces
-        """
-        self.update_interfaces(interfaces)
-    
-    def on_packet_selected(self):
-        """Handle packet selection in the table."""
-        selected = self.packet_table.selectedItems()
+        # Try to restore previous selection
+        if current_text:
+            index = self.interface_combo.findText(current_text)
+            if index >= 0:
+                self.interface_combo.setCurrentIndex(index)
         
-        if not selected:
+        # Load filters
+        self._load_filters()
+    
+    def _load_filters(self):
+        """Load capture filters from module."""
+        if not self.module:
             return
             
-        row = selected[0].row()
-        packet_id = int(self.packet_table.item(row, 0).text())
+        self.filter_combo.clear()
+        self.filter_combo.addItem("", "")  # Empty default
         
-        if self.module and hasattr(self.module, "get_packet_details"):
-            details = self.module.get_packet_details(packet_id)
-            self.packet_details.setText(details)
+        # Get filters from module
+        filters = self.module.get_capture_filters()
+        for filter_id, filter_info in filters.items():
+            self.filter_combo.addItem(
+                f"{filter_info['name']} - {filter_info['description']}",
+                filter_info['filter']
+            )
     
-    def on_packet_received(self, packet_data):
-        """
-        Handle a new packet received from the module.
+    def update_status(self):
+        """Update status display."""
+        if not self.module:
+            return
+            
+        # Update history table
+        self.refresh_history()
         
-        Args:
-            packet_data: Dictionary with packet information
-        """
-        row = self.packet_table.rowCount()
-        self.packet_table.insertRow(row)
-        
-        # Fill row with packet data
-        self.packet_table.setItem(row, 0, QTableWidgetItem(str(packet_data.get("id", row))))
-        self.packet_table.setItem(row, 1, QTableWidgetItem(packet_data.get("time", "")))
-        self.packet_table.setItem(row, 2, QTableWidgetItem(packet_data.get("src", "")))
-        self.packet_table.setItem(row, 3, QTableWidgetItem(packet_data.get("dst", "")))
-        self.packet_table.setItem(row, 4, QTableWidgetItem(packet_data.get("proto", "")))
-        self.packet_table.setItem(row, 5, QTableWidgetItem(str(packet_data.get("len", 0))))
-        self.packet_table.setItem(row, 6, QTableWidgetItem(packet_data.get("info", "")))
-        
-        # Update packet count
-        self.packet_count_label.setText(f"Packets: {row + 1}")
-        
-        # Auto-scroll to bottom if not browsing
-        if not self.packet_table.selectedItems():
-            self.packet_table.scrollToBottom()
+        # Update active capture status if any
+        if self.active_capture_id:
+            status = self.module.get_capture_status(self.active_capture_id)
+            
+            if status["status"] != "running":
+                # Capture completed or stopped
+                self.active_capture_id = None
+                self.stop_btn.setEnabled(False)
+                self.start_btn.setEnabled(True)
+                self.status_label.setText(f"Capture {status['status']}")
+                
+                # Emit signal
+                self.captureCompleted.emit(status["id"], status.get("stats", {}))
+            else:
+                # Capture still running
+                elapsed = time.time() - status["start_time"]
+                hours = int(elapsed // 3600)
+                minutes = int((elapsed % 3600) // 60)
+                seconds = int(elapsed % 60)
+                self.duration_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
     
-    def on_capture_status_changed(self, is_capturing, status_message):
-        """
-        Handle capture status changes.
+    def refresh_history(self):
+        """Refresh the capture history table."""
+        if not self.module:
+            return
+            
+        history = self.module.get_capture_history()
         
-        Args:
-            is_capturing: Whether the module is actively capturing
-            status_message: Status message to display
-        """
-        self.action_start.setEnabled(not is_capturing)
-        self.action_stop.setEnabled(is_capturing)
-        self.interface_combo.setEnabled(not is_capturing)
-        self.filter_input.setEnabled(not is_capturing)
-        self.apply_button.setEnabled(not is_capturing)
+        # Save current selection
+        selected_rows = [item.row() for item in self.history_table.selectedItems()]
+        selected_id = None
+        if selected_rows:
+            selected_id = self.history_table.item(selected_rows[0], 0).text()
         
-        self.action_save.setEnabled(self.packet_table.rowCount() > 0)
-        self.action_analyze.setEnabled(self.packet_table.rowCount() > 0)
+        # Clear table
+        self.history_table.setRowCount(0)
         
-        self.status_label.setText(status_message)
+        # Add history items
+        for i, entry in enumerate(history):
+            self.history_table.insertRow(i)
+            
+            # ID
+            self.history_table.setItem(i, 0, QTableWidgetItem(entry["id"]))
+            
+            # Start time
+            start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry["start_time"]))
+            self.history_table.setItem(i, 1, QTableWidgetItem(start_time))
+            
+            # Interface
+            self.history_table.setItem(i, 2, QTableWidgetItem(entry.get("interface", "")))
+            
+            # Filter
+            self.history_table.setItem(i, 3, QTableWidgetItem(entry.get("filter", "")))
+            
+            # Status
+            self.history_table.setItem(i, 4, QTableWidgetItem(entry.get("status", "")))
+            
+            # Packet count
+            packet_count = entry.get("packet_count", "")
+            self.history_table.setItem(i, 5, QTableWidgetItem(str(packet_count) if packet_count else ""))
+            
+            # Duration
+            if "end_time" in entry and "start_time" in entry:
+                duration = entry["end_time"] - entry["start_time"]
+                duration_str = f"{int(duration)}s"
+                self.history_table.setItem(i, 6, QTableWidgetItem(duration_str))
+            else:
+                self.history_table.setItem(i, 6, QTableWidgetItem(""))
+        
+        # Restore selection
+        if selected_id:
+            for i in range(self.history_table.rowCount()):
+                if self.history_table.item(i, 0).text() == selected_id:
+                    self.history_table.selectRow(i)
+                    break
     
-    @pyqtSlot()
-    def on_start_capture(self):
-        """Handle start capture button click."""
-        interface = self.interface_combo.currentData()
-        filter_text = self.filter_input.text().strip()
+    def selection_changed(self):
+        """Handle selection change in history table."""
+        selected_rows = [item.row() for item in self.history_table.selectedItems()]
         
-        if not interface:
-            self.status_label.setText("Error: No interface selected")
+        if selected_rows:
+            row = selected_rows[0]
+            capture_id = self.history_table.item(row, 0).text()
+            status = self.history_table.item(row, 4).text()
+            
+            # Enable/disable buttons based on status
+            self.analyze_btn.setEnabled(status in ["completed", "stopped"])
+            self.export_btn.setEnabled(status in ["completed", "stopped"])
+            
+            # Store selected capture ID
+            self.current_view_capture = capture_id
+        else:
+            # No selection
+            self.analyze_btn.setEnabled(False)
+            self.export_btn.setEnabled(False)
+            self.current_view_capture = None
+    
+    def start_capture(self):
+        """Start a packet capture."""
+        if not self.module:
+            QMessageBox.warning(self, "Module Not Available", 
+                               "Packet Analyzer module is not available.")
             return
         
-        if self.module and hasattr(self.module, "start_capture"):
-            success = self.module.start_capture(interface, filter_text)
-            if not success:
-                self.status_label.setText("Error: Failed to start capture")
+        # Get interface
+        interface = self.interface_combo.currentData()
+        if not interface:
+            QMessageBox.warning(self, "No Interface", 
+                               "Please select a network interface.")
+            return
+        
+        # Get filter
+        filter_text = self.filter_combo.currentData()
+        if not filter_text and self.filter_combo.currentText():
+            # Use custom text if no preset is selected
+            filter_text = self.filter_combo.currentText()
+        
+        # Prepare options
+        options = {
+            "duration": self.duration_spin.value(),
+            "filter": filter_text
+        }
+        
+        # Add packet limit if set
+        if self.packet_limit_spin.value() > 0:
+            options["packet_limit"] = self.packet_limit_spin.value()
+        
+        # Add ring buffer settings if enabled
+        if self.ring_buffer_check.isChecked():
+            options["ring_buffer"] = True
+            options["filesize_mb"] = self.filesize_spin.value()
+        
+        # Start capture
+        capture_id = self.module.start_capture(
+            interface, 
+            options=options,
+            callback=self._capture_completed_callback
+        )
+        
+        if capture_id:
+            # Update UI
+            self.status_label.setText(f"Capturing on {interface}")
+            self.packet_count_label.setText("0")
+            self.duration_label.setText("00:00:00")
+            self.active_capture_id = capture_id
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+            
+            # Emit signal
+            self.captureStarted.emit(capture_id)
+        else:
+            QMessageBox.warning(self, "Capture Failed", 
+                               "Failed to start packet capture.")
     
-    @pyqtSlot()
-    def on_stop_capture(self):
-        """Handle stop capture button click."""
-        if self.module and hasattr(self.module, "stop_capture"):
-            self.module.stop_capture()
+    def stop_capture(self):
+        """Stop the active packet capture."""
+        if not self.module or not self.active_capture_id:
+            return
+            
+        if self.module.stop_capture(self.active_capture_id):
+            self.status_label.setText("Capture stopped")
+            self.stop_btn.setEnabled(False)
+            self.start_btn.setEnabled(True)
+            
+            # Emit signal
+            self.captureStopped.emit(self.active_capture_id)
+            self.active_capture_id = None
     
-    @pyqtSlot()
-    def on_clear_capture(self):
-        """Handle clear capture button click."""
-        # Clear the table and details
+    def analyze_selected(self):
+        """Analyze the selected capture."""
+        if not self.module or not self.current_view_capture:
+            return
+            
+        # Switch to packet view tab
+        self.tab_widget.setCurrentWidget(self.packet_view)
+        
+        # Clear previous data
         self.packet_table.setRowCount(0)
         self.packet_details.clear()
-        self.packet_count_label.setText("Packets: 0")
         
-        # Update button states
-        self.action_save.setEnabled(False)
-        self.action_analyze.setEnabled(False)
+        # Get display filter
+        display_filter = self.display_filter_edit.text()
         
-        # Clear in module if applicable
-        if self.module and hasattr(self.module, "clear_capture"):
-            self.module.clear_capture()
-    
-    @pyqtSlot()
-    def on_save_capture(self):
-        """Handle save capture button click."""
-        from PyQt5.QtWidgets import QFileDialog
+        # Set up options
+        options = {
+            "format": "text",
+            "limit": 1000  # Limit to 1000 packets for performance
+        }
         
-        if not self.module:
+        if display_filter:
+            options["display_filter"] = display_filter
+        
+        # Analyze the capture
+        results = self.module.analyze_capture(self.current_view_capture, options)
+        
+        if "error" in results:
+            QMessageBox.warning(self, "Analysis Error", 
+                               f"Error analyzing capture: {results['error']}")
             return
             
-        # Get save file path
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Packet Capture",
-            "",
-            "PCAP Files (*.pcap);;All Files (*)"
-        )
+        # Display packets in table
+        packets = results.get("packets", [])
+        self.packet_table.setRowCount(len(packets))
         
-        if file_path and hasattr(self.module, "save_capture"):
-            success = self.module.save_capture(file_path)
+        for i, packet in enumerate(packets):
+            # Split packet line into fields
+            # Format typically: "1 0.000000 192.168.1.1 → 192.168.1.2 TCP 74 443 → 52986 [ACK] Seq=1 Ack=1 Win=64240 Len=0"
+            parts = packet.split()
             
-            if success:
-                self.status_label.setText(f"Saved capture to {file_path}")
+            if len(parts) >= 7:
+                # Packet number
+                self.packet_table.setItem(i, 0, QTableWidgetItem(parts[0]))
+                
+                # Time
+                self.packet_table.setItem(i, 1, QTableWidgetItem(parts[1]))
+                
+                # Source
+                self.packet_table.setItem(i, 2, QTableWidgetItem(parts[2]))
+                
+                # Destination (skip arrow character)
+                self.packet_table.setItem(i, 3, QTableWidgetItem(parts[4]))
+                
+                # Protocol
+                self.packet_table.setItem(i, 4, QTableWidgetItem(parts[5]))
+                
+                # Length
+                self.packet_table.setItem(i, 5, QTableWidgetItem(parts[6]))
+                
+                # Info - rest of the line
+                info = " ".join(parts[7:])
+                self.packet_table.setItem(i, 6, QTableWidgetItem(info))
             else:
-                self.status_label.setText("Error saving capture")
+                # Just put the whole line in the info column if parsing fails
+                self.packet_table.setItem(i, 0, QTableWidgetItem(str(i+1)))
+                self.packet_table.setItem(i, 6, QTableWidgetItem(packet))
+                
+        # Update status
+        self.packet_count_label.setText(str(results.get("count", 0)))
     
-    @pyqtSlot()
-    def on_load_capture(self):
-        """Handle load capture button click."""
-        from PyQt5.QtWidgets import QFileDialog
-        
-        if not self.module:
+    def apply_display_filter(self):
+        """Apply the display filter to the current view."""
+        if self.current_view_capture:
+            self.analyze_selected()
+    
+    def export_selected(self):
+        """Export the selected capture."""
+        if not self.module or not self.current_view_capture:
             return
             
-        # Get load file path
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Packet Capture",
-            "",
-            "PCAP Files (*.pcap);;All Files (*)"
-        )
+        # Ask for export format
+        formats = ["pcap", "pcapng", "txt", "csv", "json"]
+        format_dialog = QDialog(self)
+        format_dialog.setWindowTitle("Export Format")
+        format_layout = QVBoxLayout(format_dialog)
         
-        if file_path and hasattr(self.module, "load_capture"):
-            # Clear existing data
-            self.on_clear_capture()
+        format_layout.addWidget(QLabel("Select export format:"))
+        format_combo = QComboBox()
+        for fmt in formats:
+            format_combo.addItem(fmt)
+        format_layout.addWidget(format_combo)
+        
+        buttons = QHBoxLayout()
+        ok_btn = QPushButton("Export")
+        ok_btn.clicked.connect(format_dialog.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(format_dialog.reject)
+        buttons.addWidget(ok_btn)
+        buttons.addWidget(cancel_btn)
+        format_layout.addLayout(buttons)
+        
+        if format_dialog.exec_() == QDialog.Accepted:
+            selected_format = format_combo.currentText()
             
-            success = self.module.load_capture(file_path)
+            # Export the capture
+            result = self.module.export_capture(
+                self.current_view_capture,
+                format=selected_format
+            )
             
-            if success:
-                self.status_label.setText(f"Loaded capture from {file_path}")
+            if result and not result.startswith("Export"):
+                QMessageBox.information(self, "Export Complete", 
+                                      f"Capture exported to:\n{result}")
             else:
-                self.status_label.setText("Error loading capture")
+                QMessageBox.warning(self, "Export Failed", 
+                                   f"Failed to export capture: {result}")
     
-    @pyqtSlot()
-    def on_analyze(self):
-        """Handle analyze button click."""
-        if self.module and hasattr(self.module, "analyze_capture"):
-            results = self.module.analyze_capture()
-            
-            # Show analysis results
-            from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
-            
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Packet Analysis")
-            dialog.resize(600, 400)
-            
-            layout = QVBoxLayout(dialog)
-            
-            text_edit = QTextEdit()
-            text_edit.setReadOnly(True)
-            text_edit.setFont(QFont("Monospace", 10))
-            text_edit.setText(results)
-            
-            button_box = QDialogButtonBox(QDialogButtonBox.Ok)
-            button_box.accepted.connect(dialog.accept)
-            
-            layout.addWidget(text_edit)
-            layout.addWidget(button_box)
-            
-            dialog.exec_()
-    
-    @pyqtSlot()
-    def on_apply_filter(self):
-        """Handle apply filter button click."""
-        filter_text = self.filter_input.text().strip()
+    def _capture_completed_callback(self, capture_id: str, status: str, stats: Dict[str, Any]):
+        """Callback for when a capture is completed."""
+        # This will be called from the module's thread, so use signals to update UI
+        self.captureCompleted.emit(capture_id, stats)
         
-        if self.module and hasattr(self.module, "set_filter"):
-            self.module.set_filter(filter_text)
+        # Refresh the history table on next timer tick
+        pass  # The timer will handle the refresh
