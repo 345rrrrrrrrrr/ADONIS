@@ -1,838 +1,914 @@
 #!/usr/bin/env python3
 # ADONIS Memory Editor Widget
 
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-                             QPushButton, QTextEdit, QTableWidget, QTableWidgetItem, 
-                             QComboBox, QToolBar, QAction, QHeaderView, QSplitter, 
-                             QGroupBox, QSpinBox, QMessageBox, QMenu)
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QSize
-from PyQt5.QtGui import QIcon, QFont, QColor, QBrush
+import os
+import sys
+import time
+from typing import Dict, List, Any, Optional, Union, Tuple
+import struct
+import binascii
+import logging
+
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
+    QPushButton, QTableWidget, QTableWidgetItem, QComboBox, 
+    QTabWidget, QSplitter, QTreeWidget, QTreeWidgetItem,
+    QGroupBox, QTextEdit, QSpinBox, QHeaderView, QMenu,
+    QAction, QToolBar, QStatusBar, QMessageBox, QApplication,
+    QDialog, QFileDialog, QCheckBox, QRadioButton, QButtonGroup
+)
+from PyQt5.QtGui import QFont, QColor, QBrush, QIcon, QTextCursor
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QByteArray, QBuffer
+
+from ui.utils import create_action
+from core.core_module import Module
 
 class MemoryEditorWidget(QWidget):
     """
-    Widget for the memory editor module of ADONIS.
-    Provides an interface for viewing and modifying process memory.
+    Memory Editor Widget for examining and modifying process memory.
+    
+    Features:
+    - Process list and attachment
+    - Memory map visualization
+    - Memory viewing/editing in hex
+    - Memory search functionality
+    - Memory snapshot comparison
     """
     
-    def __init__(self, parent=None):
+    def __init__(self, app, parent=None):
+        """Initialize Memory Editor widget."""
         super().__init__(parent)
-        self.module = None
-        self.current_process = None
+        self.app = app
+        self.logger = logging.getLogger(__name__)
+        
+        # Get the memory editor module instance
+        self.memory_module = self.app.get_module('memory_editor')
+        if not self.memory_module:
+            self.logger.error("Memory Editor module not found!")
+        
+        # Widget state
+        self.current_process_id = None
+        self.attached_processes = {}
         self.memory_regions = []
+        self.current_memory_view = {
+            "address": 0,
+            "size": 1024,
+            "region": None
+        }
+        self.search_results = []
+        self.snapshots = {}
+        
+        # Initialize UI
         self.init_ui()
+        
+        # Setup update timer for process list
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_process_list)
+        self.update_timer.start(5000)  # Update every 5 seconds
+        
+        # Initial process list load
+        self.update_process_list()
     
     def init_ui(self):
         """Initialize the user interface."""
-        self.main_layout = QVBoxLayout(self)
+        self.layout = QVBoxLayout(self)
         
-        # Create toolbar
-        self.toolbar = QToolBar()
-        self.toolbar.setIconSize(QSize(24, 24))
-        
-        self.action_refresh = QAction(QIcon.fromTheme("view-refresh"), "Refresh", self)
-        self.action_search = QAction(QIcon.fromTheme("edit-find"), "Search", self)
-        self.action_dump = QAction(QIcon.fromTheme("document-save"), "Dump Region", self)
-        self.action_load = QAction(QIcon.fromTheme("document-open"), "Load Dump", self)
-        
-        self.toolbar.addAction(self.action_refresh)
-        self.toolbar.addAction(self.action_search)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_dump)
-        self.toolbar.addAction(self.action_load)
-        
-        self.main_layout.addWidget(self.toolbar)
-        
-        # Process selection
-        self.process_layout = QHBoxLayout()
-        
-        self.process_label = QLabel("Process:")
-        self.process_combo = QComboBox()
-        self.refresh_button = QPushButton("Refresh List")
-        self.pid_label = QLabel("PID:")
-        self.pid_input = QLineEdit()
-        self.pid_input.setPlaceholderText("Or enter PID manually")
-        self.attach_button = QPushButton("Attach")
-        
-        self.process_layout.addWidget(self.process_label)
-        self.process_layout.addWidget(self.process_combo, 2)  # Stretch factor
-        self.process_layout.addWidget(self.refresh_button)
-        self.process_layout.addWidget(self.pid_label)
-        self.process_layout.addWidget(self.pid_input, 1)  # Stretch factor
-        self.process_layout.addWidget(self.attach_button)
-        
-        self.main_layout.addLayout(self.process_layout)
-        
-        # Splitter for regions and memory view
+        # Create main splitter
         self.main_splitter = QSplitter(Qt.Horizontal)
         
-        # Memory regions panel
+        # Left side: Process and region controls
+        self.control_widget = QWidget()
+        self.control_layout = QVBoxLayout(self.control_widget)
+        
+        # Process section
+        self.process_group = QGroupBox("Processes")
+        self.process_layout = QVBoxLayout(self.process_group)
+        
+        # Process filter
+        self.filter_layout = QHBoxLayout()
+        self.filter_label = QLabel("Filter:")
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Enter process name to filter...")
+        self.filter_input.textChanged.connect(self.update_process_list)
+        self.filter_layout.addWidget(self.filter_label)
+        self.filter_layout.addWidget(self.filter_input)
+        
+        # Process table
+        self.process_table = QTableWidget()
+        self.process_table.setColumnCount(4)
+        self.process_table.setHorizontalHeaderLabels(["PID", "Name", "User", "Memory"])
+        self.process_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.process_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.process_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.process_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.process_table.itemSelectionChanged.connect(self.on_process_selected)
+        
+        # Process buttons
+        self.process_buttons_layout = QHBoxLayout()
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.update_process_list)
+        self.attach_button = QPushButton("Attach")
+        self.attach_button.clicked.connect(self.attach_to_process)
+        self.attach_button.setEnabled(False)
+        self.detach_button = QPushButton("Detach")
+        self.detach_button.clicked.connect(self.detach_from_process)
+        self.detach_button.setEnabled(False)
+        self.process_buttons_layout.addWidget(self.refresh_button)
+        self.process_buttons_layout.addWidget(self.attach_button)
+        self.process_buttons_layout.addWidget(self.detach_button)
+        
+        # Add to process layout
+        self.process_layout.addLayout(self.filter_layout)
+        self.process_layout.addWidget(self.process_table)
+        self.process_layout.addLayout(self.process_buttons_layout)
+        
+        # Memory regions section
         self.regions_group = QGroupBox("Memory Regions")
         self.regions_layout = QVBoxLayout(self.regions_group)
         
+        # Region filter
+        self.region_filter_layout = QHBoxLayout()
+        self.region_filter_label = QLabel("Filter:")
+        self.region_filter_input = QLineEdit()
+        self.region_filter_input.setPlaceholderText("Filter regions...")
+        self.region_type_combo = QComboBox()
+        self.region_type_combo.addItems(["All", "Heap", "Stack", "Code", "Data", "Library"])
+        self.region_type_combo.currentTextChanged.connect(self.filter_memory_regions)
+        self.region_filter_input.textChanged.connect(self.filter_memory_regions)
+        self.region_filter_layout.addWidget(self.region_filter_label)
+        self.region_filter_layout.addWidget(self.region_filter_input)
+        self.region_filter_layout.addWidget(self.region_type_combo)
+        
+        # Memory regions table
         self.regions_table = QTableWidget()
         self.regions_table.setColumnCount(5)
-        self.regions_table.setHorizontalHeaderLabels(["Address", "Size", "Permissions", "Name", "Type"])
-        self.regions_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.regions_table.setHorizontalHeaderLabels(
+            ["Start Address", "End Address", "Size", "Permissions", "Type"]
+        )
+        self.regions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.regions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.regions_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.regions_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.regions_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.regions_table.itemSelectionChanged.connect(self.on_region_selected)
+        self.regions_table.itemDoubleClicked.connect(self.view_memory_region)
         
+        # Add to regions layout
+        self.regions_layout.addLayout(self.region_filter_layout)
         self.regions_layout.addWidget(self.regions_table)
         
-        # Memory view and edit panel
-        self.memory_group = QGroupBox("Memory View")
-        self.memory_layout = QVBoxLayout(self.memory_group)
+        # Add to control layout
+        self.control_layout.addWidget(self.process_group)
+        self.control_layout.addWidget(self.regions_group)
         
-        # Address and navigation controls
+        # Right side: Tabbed interface for different views
+        self.tab_widget = QTabWidget()
+        
+        # Memory viewer tab
+        self.memory_tab = QWidget()
+        self.memory_layout = QVBoxLayout(self.memory_tab)
+        
+        # Memory navigation
+        self.memory_nav_layout = QHBoxLayout()
+        self.address_label = QLabel("Address:")
+        self.address_input = QLineEdit()
+        self.address_input.setPlaceholderText("Enter address (hex)...")
+        self.address_input.returnPressed.connect(self.go_to_address)
+        self.go_button = QPushButton("Go")
+        self.go_button.clicked.connect(self.go_to_address)
+        self.prev_button = QPushButton("Previous")
+        self.prev_button.clicked.connect(self.go_to_previous_page)
+        self.next_button = QPushButton("Next")
+        self.next_button.clicked.connect(self.go_to_next_page)
+        
+        self.memory_nav_layout.addWidget(self.address_label)
+        self.memory_nav_layout.addWidget(self.address_input)
+        self.memory_nav_layout.addWidget(self.go_button)
+        self.memory_nav_layout.addWidget(self.prev_button)
+        self.memory_nav_layout.addWidget(self.next_button)
+        
+        # Memory display
+        self.memory_display = HexEditor(self)
+        self.memory_display.dataChanged.connect(self.on_memory_data_changed)
+        
+        # Add to memory layout
+        self.memory_layout.addLayout(self.memory_nav_layout)
+        self.memory_layout.addWidget(self.memory_display)
+        
+        # Search tab
+        self.search_tab = QWidget()
+        self.search_layout = QVBoxLayout(self.search_tab)
+        
+        # Search controls
+        self.search_controls_layout = QVBoxLayout()
+        
+        # Search type and input
+        self.search_type_layout = QHBoxLayout()
+        self.search_type_label = QLabel("Search Type:")
+        self.search_type_combo = QComboBox()
+        self.search_type_combo.addItems(["Bytes", "Text", "Integer", "Float"])
+        self.search_type_combo.currentTextChanged.connect(self.on_search_type_changed)
+        
+        self.search_input_label = QLabel("Search Value:")
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Enter search value...")
+        
+        self.search_type_layout.addWidget(self.search_type_label)
+        self.search_type_layout.addWidget(self.search_type_combo)
+        self.search_type_layout.addWidget(self.search_input_label)
+        self.search_type_layout.addWidget(self.search_input)
+        
+        # Search region options
+        self.search_region_layout = QHBoxLayout()
+        self.search_region_label = QLabel("Search In:")
+        self.search_region_combo = QComboBox()
+        self.search_region_combo.addItems(["All", "Heap", "Stack", "Data"])
+        
+        self.search_button = QPushButton("Search")
+        self.search_button.clicked.connect(self.search_memory)
+        
+        self.search_region_layout.addWidget(self.search_region_label)
+        self.search_region_layout.addWidget(self.search_region_combo)
+        self.search_region_layout.addWidget(self.search_button)
+        
+        # Search results table
+        self.search_results_table = QTableWidget()
+        self.search_results_table.setColumnCount(3)
+        self.search_results_table.setHorizontalHeaderLabels(["Address", "Region", "Preview"])
+        self.search_results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.search_results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.search_results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.search_results_table.itemDoubleClicked.connect(self.view_search_result)
+        
+        # Add to search layout
+        self.search_layout.addLayout(self.search_type_layout)
+        self.search_layout.addLayout(self.search_region_layout)
+        self.search_layout.addWidget(self.search_results_table)
+        
+        # Snapshots tab
+        self.snapshot_tab = QWidget()
+        self.snapshot_layout = QVBoxLayout(self.snapshot_tab)
+        
+        # Snapshot controls
+        self.snapshot_buttons_layout = QHBoxLayout()
+        self.create_snapshot_button = QPushButton("Create Snapshot")
+        self.create_snapshot_button.clicked.connect(self.create_snapshot)
+        self.compare_snapshots_button = QPushButton("Compare Snapshots")
+        self.compare_snapshots_button.clicked.connect(self.compare_snapshots)
+        self.delete_snapshot_button = QPushButton("Delete Snapshot")
+        self.delete_snapshot_button.clicked.connect(self.delete_snapshot)
+        
+        self.snapshot_buttons_layout.addWidget(self.create_snapshot_button)
+        self.snapshot_buttons_layout.addWidget(self.compare_snapshots_button)
+        self.snapshot_buttons_layout.addWidget(self.delete_snapshot_button)
+        
+        # Snapshots table
+        self.snapshots_table = QTableWidget()
+        self.snapshots_table.setColumnCount(4)
+        self.snapshots_table.setHorizontalHeaderLabels(["Snapshot ID", "Process ID", "Timestamp", "Regions"])
+        self.snapshots_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.snapshots_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.snapshots_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.snapshots_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        
+        # Snapshot comparison view
+        self.snapshot_diff_layout = QVBoxLayout()
+        self.snapshot_diff_label = QLabel("Snapshot Differences:")
+        
+        self.snapshot_diff_table = QTableWidget()
+        self.snapshot_diff_table.setColumnCount(5)
+        self.snapshot_diff_table.setHorizontalHeaderLabels(["Type", "Address", "Region", "Value 1", "Value 2"])
+        self.snapshot_diff_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.snapshot_diff_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.snapshot_diff_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.snapshot_diff_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.snapshot_diff_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.snapshot_diff_table.itemDoubleClicked.connect(self.view_snapshot_diff)
+        
+        # Add to snapshot layout
+        self.snapshot_layout.addLayout(self.snapshot_buttons_layout)
+        self.snapshot_layout.addWidget(self.snapshots_table)
+        self.snapshot_layout.addWidget(self.snapshot_diff_label)
+        self.snapshot_layout.addWidget(self.snapshot_diff_table)
+        
+        # Add tabs
+        self.tab_widget.addTab(self.memory_tab, "Memory Viewer")
+        self.tab_widget.addTab(self.search_tab, "Memory Search")
+        self.tab_widget.addTab(self.snapshot_tab, "Memory Snapshots")
+        
+        # Add widgets to splitter
+        self.main_splitter.addWidget(self.control_widget)
+        self.main_splitter.addWidget(self.tab_widget)
+        
+        # Set default splitter sizes
+        self.main_splitter.setSizes([300, 700])
+        
+        # Status bar
+        self.status_bar = QStatusBar()
+        self.status_bar.showMessage("Memory Editor ready")
+        
+        # Add to main layout
+        self.layout.addWidget(self.main_splitter)
+        self.layout.addWidget(self.status_bar)
+    
+    def update_process_list(self):
+        """Update the list of running processes."""
+        if not self.memory_module:
+            return
+            
+        filter_text = self.filter_input.text()
+        
+        # Get process list from memory editor module
+        processes = self.memory_module.list_processes(filter_text)
+        
+        # Clear current table
+        self.process_table.setRowCount(0)
+        
+        # Add processes to table
+        row = 0
+        for proc in processes:
+            self.process_table.insertRow(row)
+            self.process_table.setItem(row, 0, QTableWidgetItem(str(proc["pid"])))
+            self.process_table.setItem(row, 1, QTableWidgetItem(proc["name"]))
+            self.process_table.setItem(row, 2, QTableWidgetItem(proc["user"]))
+            self.process_table.setItem(row, 3, QTableWidgetItem(f"{proc['mem']:.2f}%"))
+            
+            # Highlight attached processes
+            if str(proc["pid"]) in self.attached_processes:
+                for col in range(4):
+                    item = self.process_table.item(row, col)
+                    item.setBackground(QBrush(QColor("#e6f7ff")))
+            
+            row += 1
+    
+    def on_process_selected(self):
+        """Handle process selection event."""
+        selected_items = self.process_table.selectedItems()
+        if not selected_items:
+            self.attach_button.setEnabled(False)
+            self.detach_button.setEnabled(False)
+            return
+        
+        row = selected_items[0].row()
+        pid = self.process_table.item(row, 0).text()
+        
+        if pid in self.attached_processes:
+            self.attach_button.setEnabled(False)
+            self.detach_button.setEnabled(True)
+        else:
+            self.attach_button.setEnabled(True)
+            self.detach_button.setEnabled(False)
+    
+    def attach_to_process(self):
+        """Attach to the selected process."""
+        selected_items = self.process_table.selectedItems()
+        if not selected_items:
+            return
+        
+        row = selected_items[0].row()
+        pid = self.process_table.item(row, 0).text()
+        name = self.process_table.item(row, 1).text()
+        
+        # Attach to process using the memory editor module
+        result = self.memory_module.attach_process(int(pid))
+        
+        if result:
+            self.current_process_id = pid
+            self.attached_processes[pid] = {
+                "pid": pid,
+                "name": name,
+                "attached_time": time.time()
+            }
+            
+            self.status_bar.showMessage(f"Attached to process {name} (PID: {pid})")
+            
+            # Update process table colors
+            self.update_process_list()
+            
+            # Update button states
+            self.attach_button.setEnabled(False)
+            self.detach_button.setEnabled(True)
+            
+            # Refresh memory regions
+            self.refresh_memory_regions()
+        else:
+            QMessageBox.warning(
+                self, 
+                "Attach Failed", 
+                f"Failed to attach to process {name} (PID: {pid}). "
+                "This might be due to insufficient permissions or process protection."
+            )
+    
+    def detach_from_process(self):
+        """Detach from the current process."""
+        selected_items = self.process_table.selectedItems()
+        if not selected_items:
+            return
+        
+        row = selected_items[0].row()
+        pid = self.process_table.item(row, 0).text()
+        name = self.process_table.item(row, 1).text()
+        
+        # Detach from process using the memory editor module
+        result = self.memory_module.detach_process(pid)
+        
+        if result:
+            if pid == self.current_process_id:
+                self.current_process_id = None
+            
+            if pid in self.attached_processes:
+                del self.attached_processes[pid]
+            
+            self.status_bar.showMessage(f"Detached from process {name} (PID: {pid})")
+            
+            # Update process table colors
+            self.update_process_list()
+            
+            # Update button states
+            self.attach_button.setEnabled(True)
+            self.detach_button.setEnabled(False)
+            
+            # Clear memory regions
+            self.regions_table.setRowCount(0)
+            self.memory_regions = []
+            
+            # Clear memory display
+            self.memory_display.clear_data()
+        else:
+            QMessageBox.warning(
+                self, 
+                "Detach Failed", 
+                f"Failed to detach from process {name} (PID: {pid})."
+            )
+    
+    def refresh_memory_regions(self):
+        """Refresh the memory regions for the current process."""
+        if not self.current_process_id or self.current_process_id not in self.attached_processes:
+            return
+        
+        # Get memory map from memory editor module
+        self.memory_regions = self.memory_module.get_process_memory_map(self.current_process_id)
+        
+        # Update display
+        self.filter_memory_regions()
+    
+    def filter_memory_regions(self):
+        """Filter and display memory regions based on filter criteria."""
+        if not self.memory_regions:
+            return
+            
+        filter_text = self.region_filter_input.text().lower()
+        filter_type = self.region_type_combo.currentText().lower()
+        
+        # Clear current table
+        self.regions_table.setRowCount(0)
+        
+        # Add regions to table
+        row = 0
+        for region in self.memory_regions:
+            # Apply filters
+        self.module = None
+        self.current_process_id = None
+        self.current_memory = None
+        self.search_results = None
+        
+        if self.app:
+            self.set_app(self.app)
+            
+        self.init_ui()
+    
+    def set_app(self, app):
+        """Set the application instance."""
+        self.app = app
+        
+        # Get module reference
+        if self.app:
+            self.module = self.app.module_manager.get_module("memory_editor")
+    
+    def init_ui(self):
+        """Initialize the user interface."""
+        main_layout = QVBoxLayout()
+        
+        # Toolbar
+        toolbar = QToolBar()
+        
+        self.attach_action = QAction("Attach Process", self)
+        self.attach_action.triggered.connect(self.attach_process)
+        toolbar.addAction(self.attach_action)
+        
+        self.detach_action = QAction("Detach", self)
+        self.detach_action.triggered.connect(self.detach_process)
+        self.detach_action.setEnabled(False)
+        toolbar.addAction(self.detach_action)
+        
+        toolbar.addSeparator()
+        
+        self.search_action = QAction("Search Memory", self)
+        self.search_action.triggered.connect(self.search_memory)
+        self.search_action.setEnabled(False)
+        toolbar.addAction(self.search_action)
+        
+        self.snapshot_action = QAction("Take Snapshot", self)
+        self.snapshot_action.triggered.connect(self.take_snapshot)
+        self.snapshot_action.setEnabled(False)
+        toolbar.addAction(self.snapshot_action)
+        
+        self.compare_action = QAction("Compare Snapshots", self)
+        self.compare_action.triggered.connect(self.compare_snapshots)
+        self.compare_action.setEnabled(False)
+        toolbar.addAction(self.compare_action)
+        
+        main_layout.addWidget(toolbar)
+        
+        # Process info
+        self.process_info_group = QGroupBox("Process Information")
+        info_layout = QFormLayout()
+        
+        self.pid_label = QLabel("Not attached")
+        info_layout.addRow("PID:", self.pid_label)
+        
+        self.name_label = QLabel("")
+        info_layout.addRow("Name:", self.name_label)
+        
+        self.user_label = QLabel("")
+        info_layout.addRow("User:", self.user_label)
+        
+        self.process_info_group.setLayout(info_layout)
+        main_layout.addWidget(self.process_info_group)
+        
+        # Splitter for memory regions and editor
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Memory regions
+        self.regions_group = QGroupBox("Memory Regions")
+        regions_layout = QVBoxLayout()
+        
+        self.regions_table = QTableWidget()
+        self.regions_table.setColumnCount(5)
+        self.regions_table.setHorizontalHeaderLabels(["Address", "Size", "Perms", "Type", "Path"])
+        self.regions_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.regions_table.verticalHeader().setVisible(False)
+        self.regions_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.regions_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.regions_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.regions_table.doubleClicked.connect(self.on_region_selected)
+        regions_layout.addWidget(self.regions_table)
+        
+        self.regions_group.setLayout(regions_layout)
+        splitter.addWidget(self.regions_group)
+        
+        # Memory editor
+        self.editor_group = QGroupBox("Memory Editor")
+        editor_layout = QVBoxLayout()
+        
         self.address_layout = QHBoxLayout()
         
         self.address_label = QLabel("Address:")
-        self.address_input = QLineEdit()
-        self.address_input.setPlaceholderText("Enter hex address (e.g. 0x12345678)")
-        self.go_button = QPushButton("Go")
-        self.prev_button = QPushButton("◀")
-        self.next_button = QPushButton("▶")
-        
         self.address_layout.addWidget(self.address_label)
-        self.address_layout.addWidget(self.address_input, 1)  # Stretch factor
-        self.address_layout.addWidget(self.go_button)
-        self.address_layout.addWidget(self.prev_button)
-        self.address_layout.addWidget(self.next_button)
         
-        self.memory_layout.addLayout(self.address_layout)
+        self.address_input = QLineEdit()
+        self.address_input.setPlaceholderText("Enter memory address (hex)")
+        self.address_layout.addWidget(self.address_input)
         
-        # Bytes per row and data type controls
-        self.view_options_layout = QHBoxLayout()
+        self.size_label = QLabel("Size:")
+        self.address_layout.addWidget(self.size_label)
         
-        self.bytes_per_row_label = QLabel("Bytes per row:")
-        self.bytes_per_row_spin = QSpinBox()
-        self.bytes_per_row_spin.setRange(8, 32)
-        self.bytes_per_row_spin.setValue(16)
-        self.bytes_per_row_spin.setSingleStep(4)
+        self.size_input = QSpinBox()
+        self.size_input.setMinimum(1)
+        self.size_input.setMaximum(65536)  # 64KB max
+        self.size_input.setValue(256)
+        self.address_layout.addWidget(self.size_input)
         
-        self.data_type_label = QLabel("Data type:")
-        self.data_type_combo = QComboBox()
-        self.data_type_combo.addItems(["Hex", "Decimal", "ASCII", "Binary"])
+        self.read_button = QPushButton("Read Memory")
+        self.read_button.clicked.connect(self.read_memory)
+        self.read_button.setEnabled(False)
+        self.address_layout.addWidget(self.read_button)
         
-        self.view_options_layout.addWidget(self.bytes_per_row_label)
-        self.view_options_layout.addWidget(self.bytes_per_row_spin)
-        self.view_options_layout.addWidget(self.data_type_label)
-        self.view_options_layout.addWidget(self.data_type_combo, 1)  # Stretch factor
+        editor_layout.addLayout(self.address_layout)
         
-        self.memory_layout.addLayout(self.view_options_layout)
+        # Memory view
+        self.hex_editor = HexEditor()
+        self.hex_editor.memoryChanged.connect(self.on_memory_changed)
+        editor_layout.addWidget(self.hex_editor)
         
-        # Memory hex editor
-        self.hex_editor = QTableWidget()
-        self.hex_editor.setColumnCount(17)  # Address + 16 bytes + ASCII
-        self.hex_editor.verticalHeader().setVisible(False)
-        self.hex_editor.setSelectionMode(QTableWidget.SingleSelection)
-        self.hex_editor.setFont(QFont("Monospace", 10))
-        
-        # Set header for hex editor
-        headers = ["Address"]
-        for i in range(16):
-            headers.append(f"{i:X}")
-        headers.append("ASCII")
-        self.hex_editor.setHorizontalHeaderLabels(headers)
-        
-        self.memory_layout.addWidget(self.hex_editor, 1)  # Stretch factor
-        
-        # Add widgets to the main splitter
-        self.main_splitter.addWidget(self.regions_group)
-        self.main_splitter.addWidget(self.memory_group)
+        self.editor_group.setLayout(editor_layout)
+        splitter.addWidget(self.editor_group)
         
         # Set splitter sizes
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 2)
+        splitter.setSizes([200, 600])
+        main_layout.addWidget(splitter)
         
         # Status bar
-        self.status_layout = QHBoxLayout()
-        self.status_label = QLabel("Ready")
-        self.info_label = QLabel("")
-        self.status_layout.addWidget(self.status_label, 1)  # Stretch factor
-        self.status_layout.addWidget(self.info_label)
+        self.status_bar = QStatusBar()
+        self.status_bar.showMessage("Ready")
+        main_layout.addWidget(self.status_bar)
         
-        # Add widgets to the main layout
-        self.main_layout.addWidget(self.main_splitter, 1)  # Stretch factor
-        self.main_layout.addLayout(self.status_layout)
-        
-        # Connect signals
-        self.action_refresh.triggered.connect(self.on_refresh)
-        self.action_search.triggered.connect(self.on_search)
-        self.action_dump.triggered.connect(self.on_dump_region)
-        self.action_load.triggered.connect(self.on_load_dump)
-        
-        self.refresh_button.clicked.connect(self.on_refresh_process_list)
-        self.attach_button.clicked.connect(self.on_attach_process)
-        self.go_button.clicked.connect(self.on_go_to_address)
-        self.prev_button.clicked.connect(self.on_prev_page)
-        self.next_button.clicked.connect(self.on_next_page)
-        
-        self.regions_table.itemSelectionChanged.connect(self.on_region_selected)
-        self.bytes_per_row_spin.valueChanged.connect(self.on_bytes_per_row_changed)
-        self.data_type_combo.currentIndexChanged.connect(self.on_data_type_changed)
-        
-        # Set up context menus
-        self.hex_editor.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.hex_editor.customContextMenuRequested.connect(self.on_hex_context_menu)
-        
-        self.regions_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.regions_table.customContextMenuRequested.connect(self.on_regions_context_menu)
+        self.setLayout(main_layout)
     
-    def set_module(self, module):
-        """
-        Set the module instance associated with this widget.
-        
-        Args:
-            module: Memory editor module instance
-        """
-        self.module = module
-        
-        # Fetch initial process list
-        self.on_refresh_process_list()
-    
-    def on_refresh_process_list(self):
-        """Refresh the list of processes."""
+    def attach_process(self):
+        """Show dialog to attach to a process."""
         if not self.module:
+            QMessageBox.warning(self, "Module Not Available", 
+                               "Memory Editor module is not available.")
             return
-            
-        self.process_combo.clear()
         
-        try:
-            processes = self.module.get_process_list()
+        dialog = ProcessAttachDialog(self.module, self)
+        if dialog.exec_() == QDialog.Accepted and dialog.get_selected_pid():
+            pid = dialog.get_selected_pid()
             
-            for process in processes:
-                pid = process.get("pid", 0)
-                name = process.get("name", "Unknown")
-                self.process_combo.addItem(f"{name} (PID: {pid})", userData=pid)
+            # Attach to the process
+            process_id = self.module.attach_process(pid)
+            
+            if process_id:
+                self.current_process_id = process_id
+                self.update_process_info()
+                self.update_memory_regions()
                 
-            self.status_label.setText(f"Found {len(processes)} processes")
-            
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-    
-    def on_attach_process(self):
-        """Attach to the selected process."""
-        if not self.module:
-            return
-            
-        # Get PID from combo box or manual input
-        pid = None
-        
-        manual_pid = self.pid_input.text().strip()
-        if manual_pid:
-            try:
-                pid = int(manual_pid)
-            except ValueError:
-                self.status_label.setText("Error: Invalid PID")
-                return
-        else:
-            pid = self.process_combo.currentData()
-            
-        if not pid:
-            self.status_label.setText("Error: No process selected")
-            return
-            
-        try:
-            # Attach to process
-            process_info = self.module.attach_process(pid)
-            
-            if process_info:
-                self.current_process = process_info
-                self.status_label.setText(f"Attached to process {process_info.get('name')} (PID: {process_info.get('pid')})")
+                # Enable actions
+                self.detach_action.setEnabled(True)
+                self.search_action.setEnabled(True)
+                self.snapshot_action.setEnabled(True)
+                self.read_button.setEnabled(True)
                 
-                # Get memory regions
-                self.memory_regions = self.module.get_memory_regions()
-                self.update_regions_table()
-                
-                # Enable buttons
-                self.action_dump.setEnabled(True)
-                self.action_search.setEnabled(True)
-                
+                self.status_bar.showMessage(f"Attached to process {pid}")
             else:
-                self.status_label.setText(f"Failed to attach to process with PID {pid}")
-                
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
+                QMessageBox.warning(self, "Attachment Failed", 
+                                   f"Failed to attach to process {pid}.")
     
-    def update_regions_table(self):
+    def detach_process(self):
+        """Detach from the current process."""
+        if not self.module or not self.current_process_id:
+            return
+            
+        # Detach from the process
+        if self.module.detach_process(self.current_process_id):
+            self.current_process_id = None
+            self.current_memory = None
+            
+            # Clear UI
+            self.pid_label.setText("Not attached")
+            self.name_label.setText("")
+            self.user_label.setText("")
+            self.regions_table.setRowCount(0)
+            self.hex_editor.set_data(bytes())
+            
+            # Disable actions
+            self.detach_action.setEnabled(False)
+            self.search_action.setEnabled(False)
+            self.snapshot_action.setEnabled(False)
+            self.compare_action.setEnabled(False)
+            self.read_button.setEnabled(False)
+            
+            self.status_bar.showMessage("Detached from process")
+    
+    def update_process_info(self):
+        """Update the process information display."""
+        if not self.module or not self.current_process_id:
+            return
+            
+        process_info = self.module.get_process_status(self.current_process_id)
+        
+        if process_info and "info" in process_info:
+            info = process_info["info"]
+            self.pid_label.setText(str(info["pid"]))
+            self.name_label.setText(info["name"])
+            self.user_label.setText(info["user"])
+    
+    def update_memory_regions(self):
         """Update the memory regions table."""
+        if not self.module or not self.current_process_id:
+            return
+            
+        memory_map = self.module.get_process_memory_map(self.current_process_id)
+        
         self.regions_table.setRowCount(0)
         
-        for region in self.memory_regions:
-            row = self.regions_table.rowCount()
-            self.regions_table.insertRow(row)
+        for i, region in enumerate(memory_map):
+            self.regions_table.insertRow(i)
             
-            # Format address as hex
-            start_addr = region.get("start_address", 0)
-            size = region.get("size", 0)
-            perms = region.get("permissions", "")
-            name = region.get("name", "")
-            region_type = region.get("type", "")
+            # Format address and size
+            start_addr = f"0x{region['start_address']:x}"
+            size = region['end_address'] - region['start_address']
+            size_str = f"{size:,} bytes"
             
-            self.regions_table.setItem(row, 0, QTableWidgetItem(f"0x{start_addr:X}"))
-            self.regions_table.setItem(row, 1, QTableWidgetItem(f"{size:,}"))
-            self.regions_table.setItem(row, 2, QTableWidgetItem(perms))
-            self.regions_table.setItem(row, 3, QTableWidgetItem(name))
-            self.regions_table.setItem(row, 4, QTableWidgetItem(region_type))
+            # Create items
+            addr_item = QTableWidgetItem(start_addr)
+            addr_item.setData(Qt.UserRole, region['start_address'])
             
-            # Color rows based on permissions
-            if "w" in perms.lower():
-                for col in range(5):
-                    item = self.regions_table.item(row, col)
-                    item.setBackground(QBrush(QColor(240, 255, 240)))  # Light green
+            self.regions_table.setItem(i, 0, addr_item)
+            self.regions_table.setItem(i, 1, QTableWidgetItem(size_str))
+            self.regions_table.setItem(i, 2, QTableWidgetItem(region['permissions']))
+            self.regions_table.setItem(i, 3, QTableWidgetItem(region['type']))
+            self.regions_table.setItem(i, 4, QTableWidgetItem(region.get('path', '')))
+        
+        self.regions_table.resizeColumnsToContents()
     
-    def on_region_selected(self):
+    def on_region_selected(self, index):
         """Handle selection of a memory region."""
-        selected = self.regions_table.selectedItems()
-        
-        if not selected:
-            return
-            
-        row = selected[0].row()
+        row = index.row()
         addr_item = self.regions_table.item(row, 0)
+        address = addr_item.data(Qt.UserRole)
         
-        if addr_item:
-            # Strip the "0x" prefix if present
-            addr_text = addr_item.text()
-            addr_text = addr_text[2:] if addr_text.startswith("0x") else addr_text
-            
-            # Set address in the address input field
-            self.address_input.setText(addr_text)
-            
-            # Go to the address
-            self.on_go_to_address()
+        # Set the address in the input field
+        self.address_input.setText(f"0x{address:x}")
+        
+        # Read memory from this address
+        self.read_memory()
     
-    def on_go_to_address(self):
-        """Go to the specified memory address."""
-        if not self.module or not self.current_process:
-            return
-            
-        addr_text = self.address_input.text().strip()
-        
-        if not addr_text:
+    def read_memory(self):
+        """Read memory from the specified address."""
+        if not self.module or not self.current_process_id:
             return
             
         try:
-            # Convert address to integer, supporting hex format
-            if addr_text.startswith("0x"):
-                address = int(addr_text, 16)
-            else:
-                address = int(addr_text, 16)  # Assume hex even without prefix
-                
-            # Read memory at this address
-            bytes_per_row = self.bytes_per_row_spin.value()
-            num_rows = 16  # Number of rows to display
-            
-            memory_data = self.module.read_memory(address, bytes_per_row * num_rows)
-            
-            self.display_memory(address, memory_data, bytes_per_row)
-            
-            # Update status
-            self.status_label.setText(f"Viewing memory at address 0x{address:X}")
-            
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-    
-    def display_memory(self, start_address, data, bytes_per_row):
-        """
-        Display memory data in the hex editor.
-        
-        Args:
-            start_address: Starting address of the memory region
-            data: Bytes of memory data
-            bytes_per_row: Number of bytes to display per row
-        """
-        self.hex_editor.setRowCount(0)
-        
-        # Adjust column count based on bytes per row
-        self.hex_editor.setColumnCount(bytes_per_row + 2)  # Address + bytes + ASCII
-        
-        # Set headers
-        headers = ["Address"]
-        for i in range(bytes_per_row):
-            headers.append(f"{i:X}")
-        headers.append("ASCII")
-        self.hex_editor.setHorizontalHeaderLabels(headers)
-        
-        # Calculate number of rows
-        data_length = len(data)
-        num_rows = (data_length + bytes_per_row - 1) // bytes_per_row
-        
-        for row in range(num_rows):
-            self.hex_editor.insertRow(row)
-            
-            # Address column
-            address = start_address + (row * bytes_per_row)
-            address_item = QTableWidgetItem(f"0x{address:X}")
-            address_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            address_item.setBackground(QBrush(QColor(240, 240, 255)))  # Light blue
-            self.hex_editor.setItem(row, 0, address_item)
-            
-            # Hex values
-            ascii_text = ""
-            for col in range(bytes_per_row):
-                byte_index = row * bytes_per_row + col
-                
-                if byte_index < data_length:
-                    byte_value = data[byte_index]
-                    
-                    # Display based on selected data type
-                    data_type = self.data_type_combo.currentText()
-                    if data_type == "Hex":
-                        display_value = f"{byte_value:02X}"
-                    elif data_type == "Decimal":
-                        display_value = f"{byte_value}"
-                    elif data_type == "Binary":
-                        display_value = f"{byte_value:08b}"
-                    else:  # ASCII
-                        display_value = f"{byte_value:02X}"
-                    
-                    item = QTableWidgetItem(display_value)
-                    
-                    # Add to ASCII representation
-                    if 32 <= byte_value <= 126:  # Printable ASCII
-                        ascii_text += chr(byte_value)
-                    else:
-                        ascii_text += "."
-                else:
-                    item = QTableWidgetItem("")
-                    item.setFlags(Qt.NoItemFlags)
-                    
-                self.hex_editor.setItem(row, col + 1, item)
-            
-            # ASCII column
-            ascii_item = QTableWidgetItem(ascii_text)
-            ascii_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            ascii_item.setFont(QFont("Monospace", 10))
-            self.hex_editor.setItem(row, bytes_per_row + 1, ascii_item)
-        
-        # Update current address for navigation
-        self.current_address = start_address
-        
-        # Resize columns to contents
-        self.hex_editor.resizeColumnsToContents()
-    
-    def on_prev_page(self):
-        """Navigate to previous page of memory."""
-        if not self.current_address:
-            return
-            
-        bytes_per_row = self.bytes_per_row_spin.value()
-        num_rows = 16  # Number of rows displayed
-        prev_address = self.current_address - (bytes_per_row * num_rows)
-        
-        if prev_address < 0:
-            prev_address = 0
-            
-        self.address_input.setText(f"0x{prev_address:X}")
-        self.on_go_to_address()
-    
-    def on_next_page(self):
-        """Navigate to next page of memory."""
-        if not self.current_address:
-            return
-            
-        bytes_per_row = self.bytes_per_row_spin.value()
-        num_rows = 16  # Number of rows displayed
-        next_address = self.current_address + (bytes_per_row * num_rows)
-            
-        self.address_input.setText(f"0x{next_address:X}")
-        self.on_go_to_address()
-    
-    def on_bytes_per_row_changed(self, value):
-        """Handle change in bytes per row setting."""
-        # Refresh the display if we have data
-        if hasattr(self, "current_address") and self.current_address is not None:
-            self.on_go_to_address()
-    
-    def on_data_type_changed(self, index):
-        """Handle change in data type display setting."""
-        # Refresh the display if we have data
-        if hasattr(self, "current_address") and self.current_address is not None:
-            self.on_go_to_address()
-    
-    def on_refresh(self):
-        """Refresh the current memory view."""
-        if hasattr(self, "current_address") and self.current_address is not None:
-            self.on_go_to_address()
-    
-    def on_search(self):
-        """Open search dialog."""
-        if not self.module or not self.current_process:
-            return
-            
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QRadioButton, QButtonGroup
-            
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Memory Search")
-        dialog.resize(400, 200)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # Search type selection
-        type_layout = QHBoxLayout()
-        type_label = QLabel("Search Type:")
-        type_layout.addWidget(type_label)
-        
-        type_group = QButtonGroup(dialog)
-        
-        hex_radio = QRadioButton("Hex")
-        text_radio = QRadioButton("Text")
-        value_radio = QRadioButton("Value")
-        
-        type_group.addButton(hex_radio, 0)
-        type_group.addButton(text_radio, 1)
-        type_group.addButton(value_radio, 2)
-        
-        hex_radio.setChecked(True)
-        
-        type_layout.addWidget(hex_radio)
-        type_layout.addWidget(text_radio)
-        type_layout.addWidget(value_radio)
-        
-        layout.addLayout(type_layout)
-        
-        # Search value input
-        value_layout = QHBoxLayout()
-        value_label = QLabel("Search For:")
-        value_input = QLineEdit()
-        
-        value_layout.addWidget(value_label)
-        value_layout.addWidget(value_input)
-        
-        layout.addLayout(value_layout)
-        
-        # Options for value search
-        value_options = QGroupBox("Value Options")
-        value_options.setVisible(False)
-        value_options_layout = QHBoxLayout(value_options)
-        
-        value_type_combo = QComboBox()
-        value_type_combo.addItems(["Byte (1)", "Short (2)", "Int (4)", "Long (8)", "Float", "Double"])
-        
-        value_options_layout.addWidget(QLabel("Type:"))
-        value_options_layout.addWidget(value_type_combo)
-        
-        layout.addWidget(value_options)
-        
-        # Connect signals to show/hide options
-        def update_options():
-            value_options.setVisible(value_radio.isChecked())
-            
-            if hex_radio.isChecked():
-                value_input.setPlaceholderText("Enter hex bytes (e.g. 12 34 AB CD)")
-            elif text_radio.isChecked():
-                value_input.setPlaceholderText("Enter text to search for")
-            else:
-                value_input.setPlaceholderText("Enter numeric value")
-                
-        hex_radio.toggled.connect(update_options)
-        text_radio.toggled.connect(update_options)
-        value_radio.toggled.connect(update_options)
-        
-        update_options()  # Initial setup
-        
-        # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        
-        layout.addWidget(button_box)
-        
-        # Execute dialog
-        if dialog.exec_() == QDialog.Accepted:
-            search_type = type_group.checkedId()
-            search_value = value_input.text().strip()
-            
-            if not search_value:
-                self.status_label.setText("Error: No search value entered")
+            # Parse the address
+            address_text = self.address_input.text().strip()
+            if not address_text:
+                QMessageBox.warning(self, "Invalid Address", 
+                                   "Please enter a memory address.")
                 return
                 
+            if address_text.startswith("0x"):
+                address = int(address_text, 16)
+            else:
+                address = int(address_text)
+                
+            # Get the size
+            size = self.size_input.value()
+            
+            # Read memory
+            result = self.module.read_memory(self.current_process_id, address, size)
+            
+            if "error" in result:
+                QMessageBox.warning(self, "Memory Read Error", 
+                                   f"Failed to read memory: {result['error']}")
+                return
+                
+            # Store current memory and display it
+            self.current_memory = result
+            
+            # Convert data to bytes if it's not already
+            data = result.get("data", b"")
+            if not isinstance(data, (bytes, bytearray)):
+                if isinstance(data, list):
+                    # Convert list of integers to bytes
+                    data = bytes(data)
+                elif isinstance(data, str):
+                    # Convert hex string to bytes
+                    try:
+                        data = bytes.fromhex(data)
+                    except ValueError:
+                        # If not a hex string, encode as UTF-8
+                        data = data.encode("utf-8")
+            
+            self.hex_editor.set_data(data, address)
+            self.status_bar.showMessage(f"Read {len(data)} bytes from address 0x{address:x}")
+            
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", 
+                               f"Please enter a valid address: {str(e)}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", 
+                               f"An error occurred: {str(e)}")
+    
+    def search_memory(self):
+        """Search for a pattern in memory."""
+        if not self.module or not self.current_process_id:
+            return
+            
+        dialog = MemorySearchDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
             try:
-                # Convert input based on type
-                if search_type == 0:  # Hex
-                    # Convert space-separated hex values to bytes
-                    search_bytes = bytes.fromhex(search_value.replace(" ", ""))
-                elif search_type == 1:  # Text
-                    search_bytes = search_value.encode("utf-8")
-                else:  # Value
-                    # This would need proper implementation based on selected value type
-                    # For now, just convert text to bytes
-                    search_bytes = search_value.encode("utf-8")
+                search_options = dialog.get_search_options()
+                
+                # Show busy cursor
+                QApplication.setOverrideCursor(Qt.WaitCursor)
                 
                 # Perform search
-                results = self.module.search_memory(search_bytes)
-                
-                if results:
-                    # Show results
-                    self.show_search_results(results)
-                else:
-                    self.status_label.setText("No matches found")
-                    
-            except Exception as e:
-                self.status_label.setText(f"Search error: {str(e)}")
-    
-    def show_search_results(self, results):
-        """
-        Show search results in a dialog.
-        
-        Args:
-            results: List of addresses where matches were found
-        """
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QDialogButtonBox
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Search Results")
-        dialog.resize(300, 400)
-        
-        layout = QVBoxLayout(dialog)
-        
-        result_list = QListWidget()
-        
-        for address in results:
-            item = QListWidgetItem(f"0x{address:X}")
-            item.setData(Qt.UserRole, address)
-            result_list.addItem(item)
-        
-        layout.addWidget(QLabel(f"Found {len(results)} matches:"))
-        layout.addWidget(result_list)
-        
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
-        button_box.accepted.connect(dialog.accept)
-        
-        layout.addWidget(button_box)
-        
-        # Connect double-click to go to address
-        result_list.itemDoubleClicked.connect(lambda item: self.go_to_result(item.data(Qt.UserRole)))
-        
-        # Update status
-        self.status_label.setText(f"Found {len(results)} matches")
-        
-        dialog.exec_()
-    
-    def go_to_result(self, address):
-        """
-        Go to a search result address.
-        
-        Args:
-            address: Memory address to view
-        """
-        self.address_input.setText(f"0x{address:X}")
-        self.on_go_to_address()
-    
-    def on_dump_region(self):
-        """Dump the selected memory region to a file."""
-        if not self.module or not self.current_process:
-            return
-            
-        selected = self.regions_table.selectedItems()
-        
-        if not selected:
-            self.status_label.setText("Error: No memory region selected")
-            return
-            
-        row = selected[0].row()
-        
-        try:
-            # Get region info
-            addr_text = self.regions_table.item(row, 0).text()
-            size_text = self.regions_table.item(row, 1).text()
-            
-            # Convert address to int, removing prefix if needed
-            addr_text = addr_text[2:] if addr_text.startswith("0x") else addr_text
-            address = int(addr_text, 16)
-            
-            # Convert size to int, removing commas if needed
-            size = int(size_text.replace(",", ""))
-            
-            # Confirm before dumping large regions
-            if size > 10 * 1024 * 1024:  # 10 MB
-                result = QMessageBox.question(
-                    self, 
-                    "Confirm Dump",
-                    f"The selected region is {size / (1024*1024):.2f} MB. Continue?",
-                    QMessageBox.Yes | QMessageBox.No
+                results = self.module.search_memory(
+                    self.current_process_id,
+                    search_options["pattern"],
+                    search_options["pattern_type"],
+                    search_options["region_type"]
                 )
                 
-                if result != QMessageBox.Yes:
+                # Restore cursor
+                QApplication.restoreOverrideCursor()
+                
+                if "error" in results:
+                    QMessageBox.warning(self, "Search Error", 
+                                       f"Failed to search memory: {results['error']}")
                     return
-            
-            # Get save path
-            from PyQt5.QtWidgets import QFileDialog
-            
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save Memory Dump",
-                f"memory_dump_{address:X}.bin",
-                "Binary Files (*.bin);;All Files (*)"
-            )
-            
-            if not file_path:
-                return
+                    
+                # Store search results
+                self.search_results = results
                 
-            # Dump memory to file
-            success = self.module.dump_memory(address, size, file_path)
-            
-            if success:
-                self.status_label.setText(f"Memory dumped to {file_path}")
-            else:
-                self.status_label.setText("Error dumping memory")
+                # Show results dialog
+                self.show_search_results()
                 
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
+                self.status_bar.showMessage(
+                    f"Found {results.get('matches', 0)} matches for pattern"
+                )
+                
+            except Exception as e:
+                # Restore cursor
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, "Search Error", 
+                                   f"An error occurred: {str(e)}")
     
-    def on_load_dump(self):
-        """Load a memory dump file."""
-        if not self.module or not self.current_process:
+    def show_search_results(self):
+        """Show the search results in a dialog."""
+        if not self.search_results:
             return
             
-        # Get load file path
-        from PyQt5.QtWidgets import QFileDialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Memory Search Results")
+        dialog.resize(700, 500)
         
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Memory Dump",
-            "",
-            "Binary Files (*.bin);;All Files (*)"
+        layout = QVBoxLayout()
+        
+        results_widget = SearchResultsWidget(self.search_results)
+        results_widget.addressSelected.connect(self.on_search_result_selected)
+        layout.addWidget(results_widget)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def on_search_result_selected(self, address):
+        """Handle selection of a search result."""
+        # Set the address and read memory around it
+        self.address_input.setText(f"0x{address:x}")
+        self.read_memory()
+    
+    def take_snapshot(self):
+        """Take a snapshot of the process memory."""
+        if not self.module or not self.current_process_id:
+            return
+            
+        # Show options dialog
+        region_types = ["all", "heap", "stack", "data"]
+        selected_type, ok = QInputDialog.getItem(
+            self, "Memory Snapshot", 
+            "Select memory regions to snapshot:",
+            region_types, 0, False
         )
         
-        if not file_path:
-            return
+        if ok and selected_type:
+            # Show busy cursor
+            QApplication.setOverrideCursor(Qt.WaitCursor)
             
-        try:
-            # Get address to load at
-            address_text, ok = QInputDialog.getText(
-                self, 
-                "Load Address",
-                "Enter address to load dump at (hex):",
-                QLineEdit.Normal,
-                "0x0"
-            )
+            # Take snapshot
+            result = self.module.create_memory_snapshot(self.current_process_id, selected_type)
             
-            if not ok or not address_text:
+            # Restore cursor
+            QApplication.restoreOverrideCursor()
+            
+            if "error" in result:
+                QMessageBox.warning(self, "Snapshot Error", 
+                                   f"Failed to create snapshot: {result['error']}")
                 return
                 
-            # Convert address to int
-            address_text = address_text[2:] if address_text.startswith("0x") else address_text
-            address = int(address_text, 16)
+            self.compare_action.setEnabled(True)
             
-            # Load dump
-            success, size = self.module.load_dump(file_path, address)
+            QMessageBox.information(self, "Snapshot Created", 
+                                  f"Memory snapshot created with ID: {result['snapshot_id']}\n"
+                                  f"Captured {result['region_count']} memory regions.")
             
-            if success:
-                self.status_label.setText(f"Loaded {size} bytes at address 0x{address:X}")
-                # View the loaded memory
-                self.address_input.setText(f"0x{address:X}")
-                self.on_go_to_address()
-            else:
-                self.status_label.setText("Error loading memory dump")
-                
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-    
-    def on_hex_context_menu(self, pos):
-        """Show context menu for hex editor."""
-        if not self.hex_editor.selectedItems():
-            return
-            
-        item = self.hex_editor.itemAt(pos)
-        if not item:
-            return
-            
-        menu = QMenu(self)
-        
-        # Add menu actions
-        copy_action = menu.addAction("Copy Value")
-        edit_action = menu.addAction("Edit Value")
-        
-        # Get action result
-        action = menu.exec_(self.hex_editor.mapToGlobal(pos))
-        
-        if action == copy_action:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.clipboard().setText(item.text())
-            
-        elif action == edit_action:
-            row = item.row()
-            col = item.column()
-            
-            # Don't allow editing address or ASCII columns
-            if col == 0 or col == self.hex_editor.columnCount() - 1:
-                return
-                
-            from PyQt5.QtWidgets import QInputDialog
-            
-            current_value = item.text()
-            new_value, ok = QInputDialog.getText(
-                self,
-                "Edit Value",
-                "Enter new value:",
-                QLineEdit.Normal,
-                current_value
+            self.status_bar.showMessage(
+                f"Created memory snapshot with {result['region_count']} regions"
             )
-            
-            if ok and new_value != current_value:
-                # Calculate address of this byte
-                base_address = self.current_address
-                byte_offset = (row * (self.hex_editor.columnCount() - 2)) + (col - 1)
-                byte_address = base_address + byte_offset
-                
-                # Convert input based on current display type
-                data_type = self.data_type_combo.currentText()
-                try:
-                    if data_type == "Hex":
-                        byte_value = int(new_value, 16)
-                    elif data_type == "Decimal":
-                        byte_value = int(new_value)
-                    elif data_type == "Binary":
-                        byte_value = int(new_value, 2)
-                    else:  # ASCII
-                        byte_value = ord(new_value[0]) if new_value else 0
-                        
-                    # Ensure value is in byte range
-                    byte_value = byte_value & 0xFF
-                    
-                    # Write to memory
-                    if self.module:
-                        success = self.module.write_memory(byte_address, bytes([byte_value]))
-                        
-                        if success:
-                            # Update the display
-                            item.setText(f"{byte_value:02X}" if data_type == "Hex" else new_value)
-                            
-                            # Update ASCII column
-                            ascii_item = self.hex_editor.item(row, self.hex_editor.columnCount() - 1)
-                            if ascii_item:
-                                ascii_text = ascii_item.text()
-                                new_char = chr(byte_value) if 32 <= byte_value <= 126 else "."
-                                position = col - 1
-                                if position < len(ascii_text):
-                                    ascii_text = ascii_text[:position] + new_char + ascii_text[position+1:]
-                                    ascii_item.setText(ascii_text)
-                        else:
-                            self.status_label.setText(f"Failed to write to address 0x{byte_address:X}")
-                            
-                except Exception as e:
-                    self.status_label.setText(f"Error: {str(e)}")
     
-    def on_regions_context_menu(self, pos):
-        """Show context menu for regions table."""
-        if not self.regions_table.selectedItems():
+    def compare_snapshots(self):
+        """Compare two memory snapshots."""
+        if not self.module:
             return
             
-        item = self.regions_table.itemAt(pos)
-        if not item:
+        # This would be expanded to show a dialog to select two snapshots
+        # and display their differences
+        QMessageBox.information(self, "Not Implemented", 
+                              "Snapshot comparison feature is not fully implemented in this UI.")
+    
+    def on_memory_changed(self, address, data):
+        """Handle memory edits from the hex editor."""
+        if not self.module or not self.current_process_id or not self.current_memory:
             return
             
-        menu = QMenu(self)
+        # Write memory changes
+        result = self.module.write_memory(
+            self.current_process_id, 
+            address, 
+            data, 
+            "byte"
+        )
         
-        # Add menu actions
-        view_action = menu.addAction("View in Hex Editor")
-        dump_action = menu.addAction("Dump to File")
-        
-        # Get action result
-        action = menu.exec_(self.regions_table.mapToGlobal(pos))
-        
-        if action == view_action:
-            self.on_region_selected()
-            
-        elif action == dump_action:
-            self.on_dump_region()
+        if "error" in result:
+            QMessageBox.warning(self, "Write Error", 
+                               f"Failed to write memory: {result['error']}")
+        else:
+            self.status_bar.showMessage(
+                f"Modified {len(data)} bytes at address 0x{address:x}"
+            )
