@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.version import VERSION
 from src.core.application import AdonisApp
+from src.core.config import Config
 from src.utils.logger import setup_logging
 
 
@@ -24,7 +25,7 @@ def parse_arguments():
 
     # General options
     parser.add_argument('-v', '--version', action='store_true', help='Show version information')
-    parser.add_argument('-c', '--config', help='Path to configuration file', default=None)
+    parser.add_argument('-c', '--config', help='Path to configuration file', default='~/.adonis/config/adonis.yml')
     parser.add_argument('--no-gui', action='store_true', help='Run in command-line mode without GUI')
     
     # Logging options
@@ -39,6 +40,7 @@ def parse_arguments():
     # Other options
     parser.add_argument('--no-ai', action='store_true', help='Disable AI assistant')
     parser.add_argument('--data-dir', help='Path to data directory', default=None)
+    parser.add_argument('--safe-mode', action='store_true', help='Run in safe mode with minimal modules')
     
     return parser.parse_args()
 
@@ -72,45 +74,33 @@ def main():
     # Show startup message
     logger.info(f"Starting ADONIS v{VERSION}")
     
-    # Create application configuration
-    config_options = {}
+    # Create configuration
+    config = Config(args.config)
     
-    if args.config:
-        config_options["config_file"] = args.config
-        
+    # Override config values from command line arguments
     if args.data_dir:
-        config_options["data_dir"] = args.data_dir
+        config.set("system.paths.data_dir", args.data_dir)
     
     if args.no_ai:
-        config_options["ai_assistant.enabled"] = False
+        config.set("ai_assistant.enabled", False)
     
-    # Create and initialize the main application
+    # Create the main application
     try:
-        app = AdonisApp(config_options)
-        if not app.initialize():
-            logger.error("Failed to initialize ADONIS")
-            return 1
-            
-        logger.info("ADONIS initialized successfully")
-        
-        # Run a specific module if requested
-        if args.module:
-            # This would run a specific module in CLI mode
-            module_args = args.module_args.split() if args.module_args else []
-            success = app.run_module(args.module, module_args)
-            app.shutdown()
-            return 0 if success else 1
+        # Initialize the app with the proper options
+        app = AdonisApp(
+            config=config, 
+            safe_mode=args.safe_mode,
+            enable_ai=not args.no_ai
+        )
         
         # Start the application with GUI or CLI mode
         if args.no_gui:
-            # Command-line mode
-            app.run_cli()
-            app.shutdown()
+            # Command-line mode - just run the main app loop
+            return app.run()
         else:
             # GUI mode
             from src.ui.main_window import launch_ui
             result = launch_ui(app)
-            app.shutdown()
             return result
             
     except Exception as e:

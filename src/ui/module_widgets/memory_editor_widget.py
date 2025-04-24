@@ -15,13 +15,19 @@ from PyQt5.QtWidgets import (
     QTabWidget, QSplitter, QTreeWidget, QTreeWidgetItem,
     QGroupBox, QTextEdit, QSpinBox, QHeaderView, QMenu,
     QAction, QToolBar, QStatusBar, QMessageBox, QApplication,
-    QDialog, QFileDialog, QCheckBox, QRadioButton, QButtonGroup
+    QDialog, QFileDialog, QCheckBox, QRadioButton, QButtonGroup,
+    QDialogButtonBox, QInputDialog  # <-- Added missing imports
 )
 from PyQt5.QtGui import QFont, QColor, QBrush, QIcon, QTextCursor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QByteArray, QBuffer
 
 from ui.utils import create_action
 from core.core_module import Module
+
+# Import custom widgets/dialogs
+from ui.module_widgets.hex_editor_widget import HexEditor  # Use the new HexEditor stub
+from ui.module_widgets.memory_search_dialog import MemorySearchDialog  # Assuming this exists
+from ui.module_widgets.search_results_widget import SearchResultsWidget  # Assuming this exists
 
 class MemoryEditorWidget(QWidget):
     """
@@ -466,246 +472,31 @@ class MemoryEditorWidget(QWidget):
         # Add regions to table
         row = 0
         for region in self.memory_regions:
-            # Apply filters
-        self.module = None
-        self.current_process_id = None
-        self.current_memory = None
-        self.search_results = None
-        
-        if self.app:
-            self.set_app(self.app)
-            
-        self.init_ui()
+            # Apply text filter (by region name, type, or path if available)
+            region_name = str(region.get('name', '')).lower()
+            region_type = str(region.get('type', '')).lower()
+            region_path = str(region.get('path', '')).lower()
+            if filter_text and filter_text not in region_name and filter_text not in region_type and filter_text not in region_path:
+                continue
+            # Apply type filter
+            if filter_type != 'all' and filter_type != region_type:
+                continue
+            self.regions_table.insertRow(row)
+            self.regions_table.setItem(row, 0, QTableWidgetItem(str(region.get('start_address', ''))))
+            self.regions_table.setItem(row, 1, QTableWidgetItem(str(region.get('end_address', ''))))
+            size = region.get('end_address', 0) - region.get('start_address', 0)
+            self.regions_table.setItem(row, 2, QTableWidgetItem(f"{size:,} bytes"))
+            self.regions_table.setItem(row, 3, QTableWidgetItem(region.get('permissions', '')))
+            self.regions_table.setItem(row, 4, QTableWidgetItem(region.get('type', '')))
+            row += 1
     
-    def set_app(self, app):
-        """Set the application instance."""
-        self.app = app
-        
-        # Get module reference
-        if self.app:
-            self.module = self.app.module_manager.get_module("memory_editor")
-    
-    def init_ui(self):
-        """Initialize the user interface."""
-        main_layout = QVBoxLayout()
-        
-        # Toolbar
-        toolbar = QToolBar()
-        
-        self.attach_action = QAction("Attach Process", self)
-        self.attach_action.triggered.connect(self.attach_process)
-        toolbar.addAction(self.attach_action)
-        
-        self.detach_action = QAction("Detach", self)
-        self.detach_action.triggered.connect(self.detach_process)
-        self.detach_action.setEnabled(False)
-        toolbar.addAction(self.detach_action)
-        
-        toolbar.addSeparator()
-        
-        self.search_action = QAction("Search Memory", self)
-        self.search_action.triggered.connect(self.search_memory)
-        self.search_action.setEnabled(False)
-        toolbar.addAction(self.search_action)
-        
-        self.snapshot_action = QAction("Take Snapshot", self)
-        self.snapshot_action.triggered.connect(self.take_snapshot)
-        self.snapshot_action.setEnabled(False)
-        toolbar.addAction(self.snapshot_action)
-        
-        self.compare_action = QAction("Compare Snapshots", self)
-        self.compare_action.triggered.connect(self.compare_snapshots)
-        self.compare_action.setEnabled(False)
-        toolbar.addAction(self.compare_action)
-        
-        main_layout.addWidget(toolbar)
-        
-        # Process info
-        self.process_info_group = QGroupBox("Process Information")
-        info_layout = QFormLayout()
-        
-        self.pid_label = QLabel("Not attached")
-        info_layout.addRow("PID:", self.pid_label)
-        
-        self.name_label = QLabel("")
-        info_layout.addRow("Name:", self.name_label)
-        
-        self.user_label = QLabel("")
-        info_layout.addRow("User:", self.user_label)
-        
-        self.process_info_group.setLayout(info_layout)
-        main_layout.addWidget(self.process_info_group)
-        
-        # Splitter for memory regions and editor
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # Memory regions
-        self.regions_group = QGroupBox("Memory Regions")
-        regions_layout = QVBoxLayout()
-        
-        self.regions_table = QTableWidget()
-        self.regions_table.setColumnCount(5)
-        self.regions_table.setHorizontalHeaderLabels(["Address", "Size", "Perms", "Type", "Path"])
-        self.regions_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.regions_table.verticalHeader().setVisible(False)
-        self.regions_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.regions_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.regions_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.regions_table.doubleClicked.connect(self.on_region_selected)
-        regions_layout.addWidget(self.regions_table)
-        
-        self.regions_group.setLayout(regions_layout)
-        splitter.addWidget(self.regions_group)
-        
-        # Memory editor
-        self.editor_group = QGroupBox("Memory Editor")
-        editor_layout = QVBoxLayout()
-        
-        self.address_layout = QHBoxLayout()
-        
-        self.address_label = QLabel("Address:")
-        self.address_layout.addWidget(self.address_label)
-        
-        self.address_input = QLineEdit()
-        self.address_input.setPlaceholderText("Enter memory address (hex)")
-        self.address_layout.addWidget(self.address_input)
-        
-        self.size_label = QLabel("Size:")
-        self.address_layout.addWidget(self.size_label)
-        
-        self.size_input = QSpinBox()
-        self.size_input.setMinimum(1)
-        self.size_input.setMaximum(65536)  # 64KB max
-        self.size_input.setValue(256)
-        self.address_layout.addWidget(self.size_input)
-        
-        self.read_button = QPushButton("Read Memory")
-        self.read_button.clicked.connect(self.read_memory)
-        self.read_button.setEnabled(False)
-        self.address_layout.addWidget(self.read_button)
-        
-        editor_layout.addLayout(self.address_layout)
-        
-        # Memory view
-        self.hex_editor = HexEditor()
-        self.hex_editor.memoryChanged.connect(self.on_memory_changed)
-        editor_layout.addWidget(self.hex_editor)
-        
-        self.editor_group.setLayout(editor_layout)
-        splitter.addWidget(self.editor_group)
-        
-        # Set splitter sizes
-        splitter.setSizes([200, 600])
-        main_layout.addWidget(splitter)
-        
-        # Status bar
-        self.status_bar = QStatusBar()
-        self.status_bar.showMessage("Ready")
-        main_layout.addWidget(self.status_bar)
-        
-        self.setLayout(main_layout)
-    
-    def attach_process(self):
-        """Show dialog to attach to a process."""
-        if not self.module:
-            QMessageBox.warning(self, "Module Not Available", 
-                               "Memory Editor module is not available.")
-            return
-        
-        dialog = ProcessAttachDialog(self.module, self)
-        if dialog.exec_() == QDialog.Accepted and dialog.get_selected_pid():
-            pid = dialog.get_selected_pid()
-            
-            # Attach to the process
-            process_id = self.module.attach_process(pid)
-            
-            if process_id:
-                self.current_process_id = process_id
-                self.update_process_info()
-                self.update_memory_regions()
-                
-                # Enable actions
-                self.detach_action.setEnabled(True)
-                self.search_action.setEnabled(True)
-                self.snapshot_action.setEnabled(True)
-                self.read_button.setEnabled(True)
-                
-                self.status_bar.showMessage(f"Attached to process {pid}")
-            else:
-                QMessageBox.warning(self, "Attachment Failed", 
-                                   f"Failed to attach to process {pid}.")
-    
-    def detach_process(self):
-        """Detach from the current process."""
-        if not self.module or not self.current_process_id:
-            return
-            
-        # Detach from the process
-        if self.module.detach_process(self.current_process_id):
-            self.current_process_id = None
-            self.current_memory = None
-            
-            # Clear UI
-            self.pid_label.setText("Not attached")
-            self.name_label.setText("")
-            self.user_label.setText("")
-            self.regions_table.setRowCount(0)
-            self.hex_editor.set_data(bytes())
-            
-            # Disable actions
-            self.detach_action.setEnabled(False)
-            self.search_action.setEnabled(False)
-            self.snapshot_action.setEnabled(False)
-            self.compare_action.setEnabled(False)
-            self.read_button.setEnabled(False)
-            
-            self.status_bar.showMessage("Detached from process")
-    
-    def update_process_info(self):
-        """Update the process information display."""
-        if not self.module or not self.current_process_id:
-            return
-            
-        process_info = self.module.get_process_status(self.current_process_id)
-        
-        if process_info and "info" in process_info:
-            info = process_info["info"]
-            self.pid_label.setText(str(info["pid"]))
-            self.name_label.setText(info["name"])
-            self.user_label.setText(info["user"])
-    
-    def update_memory_regions(self):
-        """Update the memory regions table."""
-        if not self.module or not self.current_process_id:
-            return
-            
-        memory_map = self.module.get_process_memory_map(self.current_process_id)
-        
-        self.regions_table.setRowCount(0)
-        
-        for i, region in enumerate(memory_map):
-            self.regions_table.insertRow(i)
-            
-            # Format address and size
-            start_addr = f"0x{region['start_address']:x}"
-            size = region['end_address'] - region['start_address']
-            size_str = f"{size:,} bytes"
-            
-            # Create items
-            addr_item = QTableWidgetItem(start_addr)
-            addr_item.setData(Qt.UserRole, region['start_address'])
-            
-            self.regions_table.setItem(i, 0, addr_item)
-            self.regions_table.setItem(i, 1, QTableWidgetItem(size_str))
-            self.regions_table.setItem(i, 2, QTableWidgetItem(region['permissions']))
-            self.regions_table.setItem(i, 3, QTableWidgetItem(region['type']))
-            self.regions_table.setItem(i, 4, QTableWidgetItem(region.get('path', '')))
-        
-        self.regions_table.resizeColumnsToContents()
-    
-    def on_region_selected(self, index):
+    def on_region_selected(self):
         """Handle selection of a memory region."""
-        row = index.row()
+        selected_items = self.regions_table.selectedItems()
+        if not selected_items:
+            return
+        
+        row = selected_items[0].row()
         addr_item = self.regions_table.item(row, 0)
         address = addr_item.data(Qt.UserRole)
         

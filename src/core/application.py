@@ -152,6 +152,7 @@ class AdonisApp:
         
         # Check system requirements
         import psutil
+        import os
         
         # Check available RAM
         available_ram = psutil.virtual_memory().available / (1024 * 1024)  # Convert to MB
@@ -162,12 +163,22 @@ class AdonisApp:
         
         # Check available disk space
         app_dir = self.config.get("system.paths.data_dir", "~/.adonis/data")
-        disk_usage = psutil.disk_usage(app_dir)
-        available_disk_gb = disk_usage.free / (1024 * 1024 * 1024)  # Convert to GB
-        min_disk_gb = self.config.get("system.requirements.min_disk_gb", 5)  # 5GB default
+        app_dir = os.path.expanduser(app_dir)  # Properly expand the ~ character
         
-        if available_disk_gb < min_disk_gb:
-            self.logger.warning(f"Low disk space: {available_disk_gb:.1f} GB available, {min_disk_gb} GB recommended")
+        # Create directory if it doesn't exist
+        try:
+            os.makedirs(app_dir, exist_ok=True)
+            
+            # Now check disk usage
+            disk_usage = psutil.disk_usage(app_dir)
+            available_disk_gb = disk_usage.free / (1024 * 1024 * 1024)  # Convert to GB
+            min_disk_gb = self.config.get("system.requirements.min_disk_gb", 5)  # 5GB default
+            
+            if available_disk_gb < min_disk_gb:
+                self.logger.warning(f"Low disk space: {available_disk_gb:.1f} GB available, {min_disk_gb} GB recommended")
+                
+        except Exception as e:
+            self.logger.warning(f"Could not check disk space: {str(e)}")
         
         # Additional system checks can be added here
         

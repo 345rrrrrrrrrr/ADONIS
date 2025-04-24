@@ -148,3 +148,18 @@ def get_syntax_highlighting_colors(theme="dark"):
             "self": QColor("#22863A"),
             "numbers": QColor("#005CC5"),
         }
+
+def create_action(text, parent=None, shortcut=None, icon=None, tip=None, checkable=False, triggered=None):
+    from PyQt5.QtWidgets import QAction
+    action = QAction(text, parent)
+    if icon:
+        action.setIcon(icon)
+    if shortcut:
+        action.setShortcut(shortcut)
+    if tip:
+        action.setToolTip(tip)
+        action.setStatusTip(tip)
+    action.setCheckable(checkable)
+    if triggered:
+        action.triggered.connect(triggered)
+    return action
